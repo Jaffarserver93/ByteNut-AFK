@@ -50,7 +50,7 @@ export interface DiagnosticInfo {
 const RELOAD_INTERVAL_MS = 60_000;
 const LOGIN_TIMEOUT_MS = 30_000;
 
-const CHROME_ARGS = [
+const CHROME_LAUNCH_ARGS = [
   "--no-sandbox",
   "--disable-setuid-sandbox",
   "--disable-dev-shm-usage",
@@ -82,15 +82,26 @@ async function which(bin: string): Promise<string | null> {
 
 async function findChromeBinary(): Promise<string | null> {
   const candidates = [
-    "chromium-browser",
-    "chromium",
-    "google-chrome",
     "google-chrome-stable",
-    "google-chrome-beta",
+    "google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/google-chrome",
+    "/snap/bin/chromium",
+    "chromium",
+    "chromium-browser",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
   ];
   for (const bin of candidates) {
-    const p = await which(bin);
-    if (p) return p;
+    try {
+      const p = await which(bin);
+      if (p) return p;
+    } catch {}
+    try {
+      const { stdout } = await execFileAsync("test", ["-x", bin]);
+      void stdout;
+      return bin;
+    } catch {}
   }
   return null;
 }
@@ -195,49 +206,48 @@ async function doReload(): Promise<void> {
   }
 }
 
-async function connectBrowser(retries = 3): Promise<{ browser: any; page: any }> {
-  const { connect } = await import("puppeteer-real-browser");
+async function connectBrowser(): Promise<{ browser: any; page: any }> {
+  const puppeteerExtra = await import("puppeteer-extra");
+  const StealthPlugin = await import("puppeteer-extra-plugin-stealth");
+  const puppeteer = await import("puppeteer");
+
+  const pExtra = puppeteerExtra.default;
+  pExtra.use(StealthPlugin.default());
+
   const chromeBinary = await findChromeBinary();
+
   if (chromeBinary) {
     addLog("info", `Found Chrome binary: ${chromeBinary}`);
   } else {
-    addLog("warn", "No Chrome binary found in PATH — puppeteer-real-browser will use its bundled browser");
+    addLog("info", "No system Chrome found — using Puppeteer's bundled Chromium");
   }
 
-  const xvfbPath = await which("Xvfb");
-  if (!xvfbPath) {
-    addLog("warn", "Xvfb not found — Chrome may fail on a headless server. Install with: sudo apt-get install -y xvfb");
+  const launchOptions: Record<string, any> = {
+    headless: true,
+    args: CHROME_LAUNCH_ARGS,
+    ignoreHTTPSErrors: true,
+    defaultViewport: { width: 1280, height: 800 },
+  };
+
+  if (chromeBinary) {
+    launchOptions["executablePath"] = chromeBinary;
   } else {
-    addLog("info", `Xvfb available at ${xvfbPath} — virtual display will be used`);
+    const bundledPath = puppeteer.default.executablePath();
+    addLog("info", `Using bundled Chromium at: ${bundledPath}`);
+    launchOptions["executablePath"] = bundledPath;
   }
 
-  let lastErr: any;
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      if (attempt > 1) {
-        addLog("info", `Browser connect attempt ${attempt}/${retries}...`);
-        await new Promise((r) => setTimeout(r, 2000 * attempt));
-      }
-      const result = await connect({
-        headless: false,
-        args: CHROME_ARGS,
-        customConfig: chromeBinary ? { chromePath: chromeBinary } : {},
-        turnstile: true,
-        connectOption: { defaultViewport: null },
-        disableXvfb: false,
-        ignoreAllFlags: false,
-      });
-      return { browser: result.browser, page: result.page };
-    } catch (err: any) {
-      lastErr = err;
-      const msg = err?.message ?? String(err);
-      logger.warn({ err, attempt }, "[bot] connect attempt %d failed: %s", attempt, msg);
-      if (attempt < retries) {
-        addLog("warn", `Browser launch attempt ${attempt} failed (${msg}) — retrying...`);
-      }
-    }
-  }
-  throw lastErr;
+  addLog("info", "Launching browser with stealth mode...");
+  const browser = await pExtra.launch(launchOptions);
+  const pages = await browser.pages();
+  const page = pages.length > 0 ? pages[0] : await browser.newPage();
+
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+  );
+
+  addLog("success", "Browser launched successfully");
+  return { browser, page };
 }
 
 export async function startBot(): Promise<BotStatus> {
@@ -269,7 +279,7 @@ export async function startBot(): Promise<BotStatus> {
 
   (async () => {
     try {
-      const { browser, page } = await connectBrowser(3);
+      const { browser, page } = await connectBrowser();
       browserInstance = browser;
       pageInstance = page;
 

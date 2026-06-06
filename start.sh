@@ -45,24 +45,6 @@ SESSION_SECRET="${SESSION_SECRET:-dev-secret-please-change}"
 
 ok "Server will run on port $PORT (API + dashboard)"
 
-# ---- Check for Xvfb (required for headless Ubuntu servers) --
-if ! command -v Xvfb &>/dev/null; then
-  warn "Xvfb not found — required for running Chrome on a headless server"
-  if command -v apt-get &>/dev/null; then
-    log "Installing Xvfb via apt-get..."
-    sudo apt-get install -y xvfb chromium-browser 2>/dev/null || \
-      sudo apt-get install -y xvfb 2>/dev/null || \
-      warn "Could not auto-install Xvfb. Run: sudo apt-get install -y xvfb"
-    ok "Xvfb installed"
-  else
-    err "Please install Xvfb manually: sudo apt-get install -y xvfb"
-    err "The bot requires a virtual display to launch Chrome on headless servers."
-    exit 1
-  fi
-else
-  ok "Xvfb found: $(which Xvfb)"
-fi
-
 # ---- Check for pnpm -----------------------------------------
 if ! command -v pnpm &>/dev/null; then
   err "pnpm is not installed. Install it with: npm install -g pnpm"
