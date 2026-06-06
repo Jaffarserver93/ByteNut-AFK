@@ -104,6 +104,28 @@ async function which(bin: string): Promise<string | null> {
   }
 }
 
+async function isBinaryValid(binPath: string): Promise<boolean> {
+  try {
+    const { stdout, stderr } = await execFileAsync(binPath, ["--version"], { timeout: 5000 });
+    const output = (stdout + stderr).toLowerCase();
+    if (
+      output.includes("snap") ||
+      output.includes("requires the chromium snap") ||
+      output.includes("snap install") ||
+      output.trim() === ""
+    ) {
+      return false;
+    }
+    return true;
+  } catch (err: any) {
+    const msg: string = (err?.message ?? String(err)).toLowerCase();
+    if (msg.includes("snap") || msg.includes("requires the chromium snap")) {
+      return false;
+    }
+    return false;
+  }
+}
+
 async function findChromeBinary(): Promise<string | null> {
   const candidates = [
     "google-chrome-stable",
@@ -112,20 +134,22 @@ async function findChromeBinary(): Promise<string | null> {
     "/usr/bin/google-chrome",
     "/snap/bin/chromium",
     "chromium",
-    "chromium-browser",
     "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
   ];
   for (const bin of candidates) {
+    let resolvedPath: string | null = null;
     try {
-      const p = await which(bin);
-      if (p) return p;
+      resolvedPath = await which(bin);
     } catch {}
-    try {
-      const { stdout } = await execFileAsync("test", ["-x", bin]);
-      void stdout;
-      return bin;
-    } catch {}
+    if (!resolvedPath) {
+      try {
+        await execFileAsync("test", ["-x", bin], { timeout: 2000 });
+        resolvedPath = bin;
+      } catch {}
+    }
+    if (resolvedPath && await isBinaryValid(resolvedPath)) {
+      return resolvedPath;
+    }
   }
   return null;
 }
@@ -371,12 +395,6 @@ async function connectBrowser(): Promise<{ browser: any; page: any }> {
 
   const chromeBinary = await findChromeBinary();
 
-  if (chromeBinary) {
-    addLog("info", `Found Chrome binary: ${chromeBinary}`);
-  } else {
-    addLog("info", "No system Chrome found — using Puppeteer's bundled Chromium");
-  }
-
   const launchOptions: Record<string, any> = {
     headless: true,
     args: CHROME_LAUNCH_ARGS,
@@ -385,10 +403,19 @@ async function connectBrowser(): Promise<{ browser: any; page: any }> {
   };
 
   if (chromeBinary) {
+    addLog("info", `Using system Chrome: ${chromeBinary}`);
     launchOptions["executablePath"] = chromeBinary;
   } else {
-    const bundledPath = puppeteer.default.executablePath();
-    addLog("info", `Using bundled Chromium at: ${bundledPath}`);
+    let bundledPath: string;
+    try {
+      bundledPath = puppeteer.default.executablePath();
+    } catch {
+      throw new Error(
+        "No valid Chrome binary found and Puppeteer's bundled Chromium is not downloaded. " +
+        "On your Ubuntu server run: pnpm install   (this downloads Chromium, ~170MB, once)"
+      );
+    }
+    addLog("info", `No valid system Chrome found (snap stubs skipped) — using bundled Chromium: ${bundledPath}`);
     launchOptions["executablePath"] = bundledPath;
   }
 
