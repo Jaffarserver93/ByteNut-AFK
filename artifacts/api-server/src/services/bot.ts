@@ -71,6 +71,30 @@ const CHROME_LAUNCH_ARGS = [
   "--disable-blink-features=AutomationControlled",
 ];
 
+const CF_PAGE_SELECTORS = [
+  "#challenge-running",
+  "#challenge-stage",
+  "#challenge-form",
+  ".cf-browser-verification",
+  "#cf-challenge-running",
+  "input[name='cf_captcha_kind']",
+];
+
+const CF_TURNSTILE_IFRAME_SELECTORS = [
+  "iframe[src*='challenges.cloudflare.com']",
+  "iframe[src*='cloudflare.com/cdn-cgi/challenge-platform']",
+  "iframe[title*='cloudflare']",
+];
+
+const CF_CHECKBOX_SELECTORS = [
+  "input[type='checkbox']",
+  ".ctp-checkbox-label",
+  ".cb-lb",
+  "[id^='cf-chl-widget']",
+  "label[for^='cf-']",
+  ".mark",
+];
+
 async function which(bin: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync("which", [bin]);
@@ -152,6 +176,130 @@ function addLog(level: BotLogEntry["level"], message: string) {
   emitLog(entry);
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function isCloudflareChallenge(page: any): Promise<boolean> {
+  try {
+    const title: string = await page.title();
+    if (title.toLowerCase().includes("just a moment") || title.toLowerCase().includes("attention required")) {
+      return true;
+    }
+    for (const sel of CF_PAGE_SELECTORS) {
+      const el = await page.$(sel);
+      if (el) return true;
+    }
+    const frames: any[] = page.frames();
+    for (const frame of frames) {
+      const frameUrl: string = frame.url();
+      if (frameUrl.includes("challenges.cloudflare.com") || frameUrl.includes("cloudflare.com/cdn-cgi/challenge-platform")) {
+        return true;
+      }
+    }
+  } catch {}
+  return false;
+}
+
+async function clickCloudflareCheckbox(page: any): Promise<boolean> {
+  const frames: any[] = page.frames();
+
+  for (const frame of frames) {
+    const frameUrl: string = frame.url();
+    if (
+      frameUrl.includes("challenges.cloudflare.com") ||
+      frameUrl.includes("cloudflare.com/cdn-cgi/challenge-platform")
+    ) {
+      for (const sel of CF_CHECKBOX_SELECTORS) {
+        try {
+          const el = await frame.$(sel);
+          if (el) {
+            const box = await el.boundingBox();
+            if (box) {
+              await el.click();
+              return true;
+            }
+          }
+        } catch {}
+      }
+
+      try {
+        const body = await frame.$("body");
+        if (body) {
+          const box = await body.boundingBox();
+          if (box) {
+            await frame.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+            return true;
+          }
+        }
+      } catch {}
+    }
+  }
+
+  for (const sel of CF_TURNSTILE_IFRAME_SELECTORS) {
+    try {
+      const iframeEl = await page.$(sel);
+      if (iframeEl) {
+        const box = await iframeEl.boundingBox();
+        if (box) {
+          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+          return true;
+        }
+      }
+    } catch {}
+  }
+
+  return false;
+}
+
+async function handleCloudflareChallenge(page: any, maxAttempts = 5): Promise<boolean> {
+  const onChallenge = await isCloudflareChallenge(page);
+  if (!onChallenge) return true;
+
+  addLog("warn", "Cloudflare challenge detected — attempting to solve...");
+  await captureScreenshot();
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    addLog("info", `Cloudflare solve attempt ${attempt}/${maxAttempts} — clicking checkbox...`);
+
+    await sleep(1500 + Math.random() * 1000);
+
+    const clicked = await clickCloudflareCheckbox(page);
+    if (clicked) {
+      addLog("info", "Checkbox clicked — waiting for verification...");
+    } else {
+      addLog("warn", `Attempt ${attempt}: Could not find Cloudflare checkbox`);
+    }
+
+    await sleep(4000 + Math.random() * 2000);
+
+    const stillOnChallenge = await isCloudflareChallenge(page);
+    if (!stillOnChallenge) {
+      addLog("success", `Cloudflare challenge passed on attempt ${attempt}`);
+      await captureScreenshot();
+      return true;
+    }
+
+    if (attempt < maxAttempts) {
+      await sleep(3000 * attempt);
+    }
+  }
+
+  addLog("error", "Cloudflare challenge could not be solved after all attempts");
+  await captureScreenshot();
+  return false;
+}
+
+async function navigateTo(page: any, url: string, description: string): Promise<void> {
+  addLog("info", `Navigating to ${description}: ${url}`);
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: LOGIN_TIMEOUT_MS });
+
+  const cfHandled = await handleCloudflareChallenge(page);
+  if (!cfHandled) {
+    throw new Error(`Cloudflare challenge on ${description} could not be bypassed — try again later or check if the server IP is flagged`);
+  }
+}
+
 async function tryFillField(page: any, selectors: string[], value: string): Promise<boolean> {
   for (const sel of selectors) {
     try {
@@ -196,6 +344,13 @@ async function doReload(): Promise<void> {
     const targetUrl = process.env["TARGET_URL"] ?? "";
     addLog("info", `Reloading target page (reload #${reloadCount + 1})`);
     await pageInstance.reload({ waitUntil: "domcontentloaded", timeout: LOGIN_TIMEOUT_MS });
+
+    const cfHandled = await handleCloudflareChallenge(pageInstance);
+    if (!cfHandled) {
+      addLog("warn", "Cloudflare challenge appeared on reload — could not bypass, will retry next cycle");
+      return;
+    }
+
     lastReloadAt = new Date();
     reloadCount++;
     await captureScreenshot();
@@ -245,6 +400,14 @@ async function connectBrowser(): Promise<{ browser: any; page: any }> {
   await page.setUserAgent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
   );
+
+  await page.setExtraHTTPHeaders({
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Cache-Control": "max-age=0",
+    "Upgrade-Insecure-Requests": "1",
+  });
 
   addLog("success", "Browser launched successfully");
   return { browser, page };
@@ -305,10 +468,7 @@ export async function startBot(): Promise<BotStatus> {
         }
       });
 
-      addLog("info", `Navigating to login page: ${loginUrl}`);
-      emitStatus(getStatus());
-
-      await pageInstance.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: LOGIN_TIMEOUT_MS });
+      await navigateTo(pageInstance, loginUrl, "login page");
       addLog("info", "Filling in login credentials...");
 
       const usernameFilled = await tryFillField(pageInstance, [
@@ -344,14 +504,15 @@ export async function startBot(): Promise<BotStatus> {
 
       await pageInstance.waitForNavigation({ waitUntil: "domcontentloaded", timeout: LOGIN_TIMEOUT_MS }).catch(() => {});
 
+      await handleCloudflareChallenge(pageInstance);
+
       const currentUrl = pageInstance.url();
       addLog("success", `Login successful — redirected to: ${currentUrl}`);
 
       state = "navigating";
       emitStatus(getStatus());
-      addLog("info", `Navigating to target page: ${targetUrl}`);
 
-      await pageInstance.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: LOGIN_TIMEOUT_MS });
+      await navigateTo(pageInstance, targetUrl, "target page");
 
       state = "active";
       lastReloadAt = new Date();
