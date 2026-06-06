@@ -226,111 +226,150 @@ async function isCloudflareChallenge(page: any): Promise<boolean> {
   return false;
 }
 
-async function waitForCfIframeLoaded(page: any, timeoutMs = 8000): Promise<any | null> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const frames: any[] = page.frames();
-    for (const frame of frames) {
-      try {
-        const url: string = frame.url();
-        if (
-          url.includes("challenges.cloudflare.com") ||
-          url.includes("cloudflare.com/cdn-cgi/challenge-platform")
-        ) {
-          const readyState: string = await frame.evaluate(() => document.readyState).catch(() => "");
-          if (readyState === "complete" || readyState === "interactive") {
-            return frame;
-          }
-        }
-      } catch {}
-    }
-    await sleep(400);
+function getAllFrames(page: any): any[] {
+  try {
+    return page.frames() ?? [];
+  } catch {
+    return [];
   }
-  return null;
 }
 
-async function clickCloudflareCheckbox(page: any): Promise<boolean> {
-  const cfFrame = await waitForCfIframeLoaded(page, 8000);
+function isCfFrame(url: string): boolean {
+  return (
+    url.includes("challenges.cloudflare.com") ||
+    url.includes("cloudflare.com/cdn-cgi/challenge-platform") ||
+    url.includes("cloudflare.com/cdn-cgi/turnstile")
+  );
+}
 
-  if (cfFrame) {
-    for (const sel of CF_CHECKBOX_SELECTORS) {
-      try {
-        const el = await cfFrame.$(sel);
-        if (el) {
-          const box = await el.boundingBox();
-          if (box && box.width > 0 && box.height > 0) {
-            await cfFrame.evaluate((el: any) => el.scrollIntoView(), el);
-            await sleep(300);
-            await el.click();
-            return true;
-          }
-        }
-      } catch {}
+async function tryCfClickInFrame(frame: any): Promise<boolean> {
+  for (const sel of CF_CHECKBOX_SELECTORS) {
+    try {
+      const el = await frame.$(sel);
+      if (!el) continue;
+      const box = await el.boundingBox();
+      if (box && box.width > 0 && box.height > 0) {
+        await el.click();
+        return true;
+      }
+    } catch {}
+  }
+  try {
+    const body = await frame.$("body");
+    if (body) {
+      const box = await body.boundingBox();
+      if (box && box.width > 10 && box.height > 10) {
+        await frame.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        return true;
+      }
     }
-
-    try {
-      const body = await cfFrame.$("body");
-      if (body) {
-        const box = await body.boundingBox();
-        if (box) {
-          await cfFrame.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-          return true;
-        }
-      }
-    } catch {}
-  }
-
-  for (const sel of CF_TURNSTILE_IFRAME_SELECTORS) {
-    try {
-      const iframeEl = await page.$(sel);
-      if (iframeEl) {
-        const box = await iframeEl.boundingBox();
-        if (box && box.width > 0) {
-          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-          return true;
-        }
-      }
-    } catch {}
-  }
-
+  } catch {}
   return false;
 }
 
-async function handleCloudflareChallenge(page: any, maxAttempts = 5): Promise<boolean> {
+async function tryCfClickOnMainPage(page: any): Promise<boolean> {
+  const mainPageSelectors = [
+    "#challenge-form input[type='button']",
+    "#challenge-form input[type='submit']",
+    "#challenge-stage input[type='button']",
+    "#challenge-stage input[type='submit']",
+    "input[value='Verify you are human']",
+    "input[value='Submit']",
+    ".ctp-checkbox-label",
+    ".cb-lb",
+    "[data-translate='verifyButton']",
+  ];
+  for (const sel of mainPageSelectors) {
+    try {
+      const el = await page.$(sel);
+      if (!el) continue;
+      const box = await el.boundingBox();
+      if (box && box.width > 0 && box.height > 0) {
+        await el.click();
+        return true;
+      }
+    } catch {}
+  }
+
+  for (const ifrSel of CF_TURNSTILE_IFRAME_SELECTORS) {
+    try {
+      const ifrEl = await page.$(ifrSel);
+      if (!ifrEl) continue;
+      const box = await ifrEl.boundingBox();
+      if (box && box.width > 0 && box.height > 0) {
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        return true;
+      }
+    } catch {}
+  }
+  return false;
+}
+
+async function handleCloudflareChallenge(page: any): Promise<boolean> {
   const onChallenge = await isCloudflareChallenge(page);
   if (!onChallenge) return true;
 
-  addLog("warn", "Cloudflare challenge detected — attempting to solve...");
+  let title = "unknown";
+  let url = "unknown";
+  try { title = await page.title(); } catch {}
+  try { url = page.url(); } catch {}
+
+  addLog("warn", `Cloudflare challenge detected — Page: "${title}" at ${url}`);
   await captureScreenshot();
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    addLog("info", `Cloudflare solve attempt ${attempt}/${maxAttempts} — clicking checkbox...`);
+  // Phase 1: Wait up to 20 seconds for JS auto-resolve (no checkbox needed)
+  addLog("info", "Waiting for Cloudflare JS challenge to auto-resolve (up to 20s)...");
+  for (let i = 0; i < 20; i++) {
+    await sleep(1000);
+    const still = await isCloudflareChallenge(page);
+    if (!still) {
+      addLog("success", `Cloudflare auto-resolved after ${i + 1}s`);
+      await captureScreenshot();
+      return true;
+    }
+  }
 
-    await sleep(1500 + Math.random() * 1000);
+  await captureScreenshot();
+  addLog("info", "Auto-resolve timed out — trying to click challenge elements...");
 
-    const clicked = await clickCloudflareCheckbox(page);
-    if (clicked) {
-      addLog("info", "Checkbox clicked — waiting for verification...");
-    } else {
-      addLog("warn", `Attempt ${attempt}: Could not find Cloudflare checkbox`);
+  // Phase 2: Try clicking (up to 5 rounds)
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    addLog("info", `Cloudflare click attempt ${attempt}/5...`);
+
+    let clicked = await tryCfClickOnMainPage(page);
+
+    if (!clicked) {
+      const frames = getAllFrames(page);
+      for (const frame of frames) {
+        try {
+          const frameUrl: string = frame.url();
+          if (isCfFrame(frameUrl)) {
+            clicked = await tryCfClickInFrame(frame);
+            if (clicked) {
+              addLog("info", `Clicked inside CF frame: ${frameUrl}`);
+              break;
+            }
+          }
+        } catch {}
+      }
     }
 
-    await sleep(4000 + Math.random() * 2000);
+    if (!clicked) {
+      addLog("warn", `Attempt ${attempt}: No clickable CF element found`);
+    }
 
-    const stillOnChallenge = await isCloudflareChallenge(page);
-    if (!stillOnChallenge) {
+    await sleep(5000);
+    const still = await isCloudflareChallenge(page);
+    if (!still) {
       addLog("success", `Cloudflare challenge passed on attempt ${attempt}`);
       await captureScreenshot();
       return true;
     }
 
-    if (attempt < maxAttempts) {
-      await sleep(3000 * attempt);
-    }
+    await captureScreenshot();
   }
 
-  addLog("error", "Cloudflare challenge could not be solved after all attempts");
-  await captureScreenshot();
+  addLog("error", "Cloudflare could not be bypassed. Your server IP may be blocked by Cloudflare. Check the Live Preview for what the browser sees.");
   return false;
 }
 
@@ -374,7 +413,11 @@ async function tryClick(page: any, selectors: string[]): Promise<boolean> {
 async function captureScreenshot(): Promise<void> {
   if (!pageInstance) return;
   try {
-    const buf: Buffer = await pageInstance.screenshot({ type: "png", fullPage: false });
+    const buf: Buffer = await pageInstance.screenshot({
+      type: "jpeg",
+      quality: 70,
+      fullPage: false,
+    });
     lastScreenshot = { data: buf.toString("base64"), capturedAt: new Date().toISOString() };
     emitScreenshot(lastScreenshot.data!, lastScreenshot.capturedAt!);
   } catch (err) {

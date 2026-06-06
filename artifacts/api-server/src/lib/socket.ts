@@ -11,6 +11,7 @@ export function initSocket(httpServer: HttpServer): SocketIOServer {
   io = new SocketIOServer(httpServer, {
     cors: { origin: "*", methods: ["GET", "POST"] },
     path: "/socket.io",
+    maxHttpBufferSize: 5 * 1024 * 1024,
   });
 
   io.on("connection", (socket) => {

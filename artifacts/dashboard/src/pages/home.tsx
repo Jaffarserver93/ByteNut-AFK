@@ -267,7 +267,7 @@ export default function Dashboard() {
             <CardContent className="p-0 flex-1 relative bg-black/40 flex items-center justify-center min-h-[300px]">
               {screenshotData?.data ? (
                 <img 
-                  src={`data:image/png;base64,${screenshotData.data}`} 
+                  src={`data:image/jpeg;base64,${screenshotData.data}`} 
                   alt="Bot Browser View" 
                   className="w-full h-full object-contain"
                 />
