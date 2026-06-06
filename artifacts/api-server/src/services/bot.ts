@@ -132,9 +132,11 @@ async function findChromeBinary(): Promise<string | null> {
     "google-chrome",
     "/usr/bin/google-chrome-stable",
     "/usr/bin/google-chrome",
-    "/snap/bin/chromium",
     "chromium",
+    "/run/current-system/sw/bin/chromium",
     "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/nix/store/qa9cnw4v5xkxyip6mb9kxqfq1z4x2dx1-chromium-138.0.7204.100/bin/chromium",
   ];
   for (const bin of candidates) {
     let resolvedPath: string | null = null;

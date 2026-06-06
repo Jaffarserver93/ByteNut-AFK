@@ -59,3 +59,6 @@ PORT = "8080"
 LOGIN_URL = "https://www.bytenut.com/auth/login"
 TARGET_URL = "https://www.bytenut.com/free-gamepanel/87079436"
 BOT_USERNAME = "UserrmwlZJ"
+
+[nix]
+channel = "stable-25_05"
