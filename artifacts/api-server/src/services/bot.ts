@@ -217,15 +217,180 @@ async function isCloudflareChallenge(page: any): Promise<boolean> {
       const el = await page.$(sel);
       if (el) return true;
     }
-    const frames: any[] = page.frames();
-    for (const frame of frames) {
-      const frameUrl: string = frame.url();
-      if (frameUrl.includes("challenges.cloudflare.com") || frameUrl.includes("cloudflare.com/cdn-cgi/challenge-platform")) {
+    // NOTE: We intentionally do NOT check for iframe URLs here.
+    // An embedded Turnstile widget (e.g. "Verify you are human" checkbox inside a
+    // page that has otherwise loaded) also uses challenges.cloudflare.com iframes,
+    // but is NOT a full-page challenge. Treating it as one sends the bot into the
+    // wrong bypass flow where it finds nothing to click.
+    // Embedded Turnstile widgets are handled by handleEmbeddedTurnstile() instead.
+  } catch {}
+  return false;
+}
+
+/**
+ * Detects and clicks an embedded Cloudflare Turnstile checkbox widget that lives
+ * inside a page that has already loaded (e.g. the ByteNut "Extend Server Time" form).
+ * Returns true if the widget was found and clicked (or was already solved), false otherwise.
+ */
+async function handleEmbeddedTurnstile(page: any): Promise<boolean> {
+  const turnstileIframeSelectors = [
+    "iframe[src*='challenges.cloudflare.com']",
+    "iframe[src*='cloudflare.com/cdn-cgi/challenge-platform']",
+    "iframe[src*='cloudflare.com/cdn-cgi/turnstile']",
+    "iframe[title*='cloudflare' i]",
+    "iframe[title*='turnstile' i]",
+  ];
+
+  for (const ifrSel of turnstileIframeSelectors) {
+    try {
+      const ifrEl = await page.$(ifrSel);
+      if (!ifrEl) continue;
+
+      // Check if already solved (hidden input has a non-empty value)
+      try {
+        const responseInput = await page.$('input[name="cf-turnstile-response"]');
+        if (responseInput) {
+          const val: string = await page.evaluate((el: any) => el.value, responseInput);
+          if (val && val.length > 10) {
+            addLog("info", "Embedded Turnstile already solved (response value present)");
+            return true;
+          }
+        }
+      } catch {}
+
+      const box = await ifrEl.boundingBox();
+      if (!box || box.width <= 0 || box.height <= 0) continue;
+
+      addLog("info", `Found embedded Turnstile iframe (${Math.round(box.width)}×${Math.round(box.height)}) — attempting to click checkbox...`);
+
+      // Strategy 1: Access the iframe's contentFrame and click checkbox inside it
+      try {
+        const frame = await ifrEl.contentFrame();
+        if (frame) {
+          await simulateHumanMouse(page);
+          await sleep(500);
+
+          const checkboxSelectors = [
+            "input[type='checkbox']",
+            ".ctp-checkbox-label",
+            ".cb-lb",
+            ".mark",
+            "[id^='cf-chl-widget']",
+            "label",
+            "div[role='checkbox']",
+          ];
+
+          for (const cbSel of checkboxSelectors) {
+            try {
+              const cbEl = await frame.$(cbSel);
+              if (!cbEl) continue;
+              const cbBox = await cbEl.boundingBox();
+              if (cbBox && cbBox.width > 0 && cbBox.height > 0) {
+                await frame.mouse
+                  ? frame.mouse.move(cbBox.x + cbBox.width / 2, cbBox.y + cbBox.height / 2, { steps: 5 })
+                  : null;
+                await sleep(200);
+                await cbEl.click();
+                addLog("info", `Clicked Turnstile checkbox via contentFrame (selector: ${cbSel})`);
+                await sleep(2000);
+                return true;
+              }
+            } catch {}
+          }
+        }
+      } catch {}
+
+      // Strategy 2: Click the centre of the iframe bounding box directly on the page
+      try {
+        await simulateHumanMouse(page);
+        await sleep(300);
+        const cx = box.x + box.width / 2;
+        const cy = box.y + box.height / 2;
+
+        // Move in and click the left part (where checkbox is, not the logo)
+        const checkboxCx = box.x + Math.min(30, box.width * 0.25);
+        const checkboxCy = box.y + box.height / 2;
+
+        await page.mouse.move(checkboxCx, checkboxCy, { steps: 8 });
+        await sleep(200);
+        await page.mouse.click(checkboxCx, checkboxCy);
+        addLog("info", `Clicked Turnstile iframe at checkbox position (${Math.round(checkboxCx)}, ${Math.round(checkboxCy)})`);
+        await sleep(2000);
         return true;
+      } catch {}
+
+      // Strategy 3: Click dead-centre of the iframe as last resort
+      try {
+        const cx = box.x + box.width / 2;
+        const cy = box.y + box.height / 2;
+        await page.mouse.click(cx, cy);
+        addLog("info", `Clicked Turnstile iframe centre (${Math.round(cx)}, ${Math.round(cy)})`);
+        await sleep(2000);
+        return true;
+      } catch {}
+    } catch {}
+  }
+  return false;
+}
+
+/**
+ * After reaching the target page, interact with the page-specific actions:
+ * solve the embedded Turnstile and click "Extend Server Time" if present.
+ */
+async function handleTargetPageActions(page: any): Promise<void> {
+  const extendSelectors = [
+    'button:has-text("Extend")',
+    'a:has-text("Extend")',
+    '[class*="extend" i]',
+    'button[class*="btn" i]',
+    'button.btn-success',
+    'button.btn-primary',
+    "button.bg-green",
+    'button[type="submit"]',
+  ];
+
+  // Check if there's a Turnstile to solve
+  try {
+    const turnstileInput = await page.$('input[name="cf-turnstile-response"]');
+    if (turnstileInput) {
+      addLog("info", "Embedded Turnstile detected on target page — solving...");
+      const solved = await handleEmbeddedTurnstile(page);
+      if (solved) {
+        addLog("success", "Embedded Turnstile solved");
+        await sleep(1500);
+        await captureScreenshot();
+      } else {
+        addLog("warn", "Could not solve embedded Turnstile — will retry on next reload");
       }
     }
   } catch {}
-  return false;
+
+  // Try to click "Extend Server Time" or similar button
+  try {
+    for (const sel of extendSelectors) {
+      try {
+        const el = await page.$(sel);
+        if (!el) continue;
+        const box = await el.boundingBox();
+        if (box && box.width > 0 && box.height > 0) {
+          const text: string = await page.evaluate((e: any) => e.textContent ?? "", el);
+          if (
+            text.toLowerCase().includes("extend") ||
+            text.toLowerCase().includes("renew") ||
+            text.toLowerCase().includes("+") ||
+            text.toLowerCase().includes("time")
+          ) {
+            addLog("info", `Clicking action button: "${text.trim().slice(0, 60)}"`);
+            await el.click();
+            await sleep(2000);
+            await captureScreenshot();
+            addLog("success", "Action button clicked successfully");
+            return;
+          }
+        }
+      } catch {}
+    }
+  } catch {}
 }
 
 function getAllFrames(page: any): any[] {
@@ -498,6 +663,11 @@ async function doReload(): Promise<void> {
     await captureScreenshot();
     emitStatus(getStatus());
     addLog("success", `Page reloaded successfully (#${reloadCount}) — ${targetUrl}`);
+
+    // Handle any embedded Turnstile + action buttons on the target page
+    await handleTargetPageActions(pageInstance);
+    await captureScreenshot();
+    emitStatus(getStatus());
   } catch (err: any) {
     addLog("warn", `Reload failed: ${err?.message ?? String(err)}`);
   }
@@ -668,6 +838,11 @@ export async function startBot(): Promise<BotStatus> {
       await captureScreenshot();
       emitStatus(getStatus());
       addLog("success", `Now active on target page: ${targetUrl}`);
+
+      // Handle embedded Turnstile + action buttons on first load
+      await handleTargetPageActions(pageInstance);
+      await captureScreenshot();
+      emitStatus(getStatus());
 
       // Upgrade screenshot interval to 10s now that bot is active
       if (screenshotTimer) { clearInterval(screenshotTimer); screenshotTimer = null; }
