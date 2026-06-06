@@ -56,7 +56,7 @@ const CHROME_LAUNCH_ARGS = [
   "--disable-dev-shm-usage",
   "--disable-gpu",
   "--disable-software-rasterizer",
-  "--window-size=1280,800",
+  "--window-size=1280,720",
   "--no-first-run",
   "--no-default-browser-check",
   "--disable-extensions",
@@ -462,7 +462,7 @@ async function connectBrowser(): Promise<{ browser: any; page: any }> {
     headless: true,
     args: CHROME_LAUNCH_ARGS,
     ignoreHTTPSErrors: true,
-    defaultViewport: { width: 1280, height: 800 },
+    defaultViewport: { width: 1280, height: 720 },
   };
 
   if (chromeBinary) {
@@ -536,7 +536,7 @@ export async function startBot(): Promise<BotStatus> {
       browserInstance = browser;
       pageInstance = page;
 
-      await pageInstance.setViewport({ width: 1280, height: 800 });
+      await pageInstance.setViewport({ width: 1280, height: 720 });
 
       pageInstance.on("close", async () => {
         if (state === "active" || state === "navigating" || state === "logging_in") {

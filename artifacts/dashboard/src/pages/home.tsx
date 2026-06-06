@@ -250,40 +250,45 @@ export default function Dashboard() {
           </Card>
         </div>
 
-        {/* Main Content Grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 flex-1 min-h-[400px]">
-          {/* Live Preview Panel */}
-          <Card className="bg-card/40 backdrop-blur-md border-white/5 shadow-xl flex flex-col overflow-hidden">
-            <CardHeader className="border-b border-white/5 py-4 px-6 bg-black/20 flex flex-row items-center justify-between">
-              <CardTitle className="text-lg font-medium flex items-center gap-2 text-white">
-                <ImageIcon className="h-5 w-5 text-primary" /> Live Preview
-              </CardTitle>
-              {screenshotData?.capturedAt && (
-                <span className="text-xs text-muted-foreground">
-                  {new Date(screenshotData.capturedAt).toLocaleTimeString()}
-                </span>
-              )}
-            </CardHeader>
-            <CardContent className="p-0 flex-1 relative bg-black/40 flex items-center justify-center min-h-[300px]">
-              {screenshotData?.data ? (
-                <img 
-                  src={`data:image/jpeg;base64,${screenshotData.data}`} 
-                  alt="Bot Browser View" 
-                  className="w-full h-full object-contain"
-                />
-              ) : (
-                <div className="flex flex-col items-center justify-center text-muted-foreground p-8 text-center">
-                  <ImageIcon className="h-12 w-12 mb-4 opacity-20" />
-                  <p>Bot not running</p>
-                  <p className="text-sm opacity-70">Start the bot to see the live preview</p>
-                </div>
-              )}
-              
-              {/* Overlay gradient for depth */}
-              <div className="absolute inset-0 shadow-[inset_0_0_40px_rgba(0,0,0,0.8)] pointer-events-none" />
-            </CardContent>
-          </Card>
+        {/* Live Preview — full width, locked 16:9 (1280×720) */}
+        <Card className="bg-card/40 backdrop-blur-md border-white/5 shadow-xl overflow-hidden">
+          <CardHeader className="border-b border-white/5 py-3 px-6 bg-black/20 flex flex-row items-center justify-between">
+            <CardTitle className="text-lg font-medium flex items-center gap-2 text-white">
+              <ImageIcon className="h-5 w-5 text-primary" /> Live Preview
+              <span className="text-xs text-muted-foreground font-normal ml-1">1280 × 720</span>
+            </CardTitle>
+            {screenshotData?.capturedAt && (
+              <span className="text-xs text-muted-foreground">
+                {new Date(screenshotData.capturedAt).toLocaleTimeString()}
+              </span>
+            )}
+          </CardHeader>
+          <CardContent className="p-0 bg-black">
+            {/* 16:9 aspect ratio wrapper */}
+            <div className="relative w-full" style={{ paddingTop: "56.25%" }}>
+              <div className="absolute inset-0 flex items-center justify-center">
+                {screenshotData?.data ? (
+                  <img
+                    src={`data:image/jpeg;base64,${screenshotData.data}`}
+                    alt="Bot Browser View"
+                    className="w-full h-full object-cover"
+                    style={{ imageRendering: "auto" }}
+                  />
+                ) : (
+                  <div className="flex flex-col items-center justify-center text-muted-foreground p-8 text-center">
+                    <ImageIcon className="h-12 w-12 mb-4 opacity-20" />
+                    <p>Bot not running</p>
+                    <p className="text-sm opacity-70">Start the bot to see the live preview</p>
+                  </div>
+                )}
+                <div className="absolute inset-0 shadow-[inset_0_0_40px_rgba(0,0,0,0.6)] pointer-events-none" />
+              </div>
+            </div>
+          </CardContent>
+        </Card>
 
+        {/* Bottom Grid: Audit Log only */}
+        <div className="grid grid-cols-1 gap-6 flex-1 min-h-[400px]">
           {/* Audit Log Panel */}
           <Card className="bg-card/40 backdrop-blur-md border-white/5 shadow-xl flex flex-col overflow-hidden">
             <CardHeader className="border-b border-white/5 py-4 px-6 bg-black/20 flex flex-row items-center justify-between">
