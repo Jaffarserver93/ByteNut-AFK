@@ -2,6 +2,7 @@
 # ============================================================
 # ByteNut AFK Bot — Start Script
 # Usage: ./start.sh
+# Runs API + dashboard on a single port.
 # ============================================================
 set -euo pipefail
 
@@ -39,12 +40,10 @@ for var in "${REQUIRED_VARS[@]}"; do
 done
 
 # ---- Defaults -----------------------------------------------
-API_PORT="${API_PORT:-3000}"
-DASHBOARD_PORT="${DASHBOARD_PORT:-8080}"
+PORT="${PORT:-3000}"
 SESSION_SECRET="${SESSION_SECRET:-dev-secret-please-change}"
 
-ok "API server will run on port $API_PORT"
-ok "Dashboard will run on port $DASHBOARD_PORT"
+ok "Server will run on port $PORT (API + dashboard)"
 
 # ---- Check for pnpm -----------------------------------------
 if ! command -v pnpm &>/dev/null; then
@@ -57,61 +56,49 @@ log "Installing dependencies..."
 pnpm install --frozen-lockfile 2>/dev/null || pnpm install
 ok "Dependencies installed"
 
+# ---- Build dashboard ----------------------------------------
+log "Building dashboard (will be served by API server)..."
+NODE_ENV=production \
+  BASE_PATH=/ \
+  pnpm --filter @workspace/dashboard run build
+ok "Dashboard built → artifacts/dashboard/dist/public"
+
 # ---- Build API server ---------------------------------------
 log "Building API server..."
 pnpm --filter @workspace/api-server run build
 ok "API server built"
 
-# ---- Build dashboard ----------------------------------------
-log "Building dashboard (API base URL: http://localhost:$API_PORT)..."
-VITE_API_BASE_URL="http://localhost:$API_PORT" \
-  pnpm --filter @workspace/dashboard run build
-ok "Dashboard built"
-
-# ---- Install serve for dashboard (if not available) ---------
-if ! command -v serve &>/dev/null; then
-  log "Installing 'serve' for dashboard hosting..."
-  npm install -g serve --quiet
-fi
-
 # ---- Cleanup on exit ----------------------------------------
 cleanup() {
   log "Shutting down..."
-  [ -n "${API_PID:-}" ]  && kill "$API_PID"  2>/dev/null || true
-  [ -n "${DASH_PID:-}" ] && kill "$DASH_PID" 2>/dev/null || true
+  [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null || true
   ok "Stopped."
 }
 trap cleanup EXIT INT TERM
 
-# ---- Start API server ---------------------------------------
-log "Starting API server on port $API_PORT..."
-PORT="$API_PORT" \
+# ---- Start server -------------------------------------------
+log "Starting server on port $PORT..."
+PORT="$PORT" \
   LOGIN_URL="$LOGIN_URL" \
   TARGET_URL="$TARGET_URL" \
   BOT_USERNAME="$BOT_USERNAME" \
   BOT_PASSWORD="$BOT_PASSWORD" \
   SESSION_SECRET="$SESSION_SECRET" \
   pnpm --filter @workspace/api-server run start &
-API_PID=$!
-ok "API server started (PID: $API_PID)"
-
-# ---- Start dashboard server ---------------------------------
-log "Starting dashboard on port $DASHBOARD_PORT..."
-serve -s artifacts/dashboard/dist/public -l "$DASHBOARD_PORT" --no-clipboard &
-DASH_PID=$!
-ok "Dashboard started (PID: $DASH_PID)"
+SERVER_PID=$!
+ok "Server started (PID: $SERVER_PID)"
 
 echo ""
 echo -e "${GREEN}=================================================${NC}"
 echo -e "${GREEN}  ByteNut AFK Bot is running!${NC}"
 echo -e "${GREEN}=================================================${NC}"
-echo -e "  API Server:  http://localhost:${API_PORT}"
-echo -e "  Dashboard:   http://localhost:${DASHBOARD_PORT}"
+echo -e "  Open in browser: http://localhost:${PORT}"
 echo -e ""
-echo -e "  Open the dashboard in your browser and click"
-echo -e "  'Start Bot' to begin the AFK session."
+echo -e "  API:       http://localhost:${PORT}/api"
+echo -e "  Dashboard: http://localhost:${PORT}/"
+echo -e ""
+echo -e "  Click 'Start Bot' to begin the AFK session."
 echo -e "${GREEN}=================================================${NC}"
 echo ""
 
-# Wait for both processes
-wait "$API_PID" "$DASH_PID"
+wait "$SERVER_PID"

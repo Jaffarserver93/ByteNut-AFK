@@ -41,8 +41,7 @@ See `.env.example` for the full template. Required vars:
 | `TARGET_URL` | Page to stay active on after login |
 | `BOT_USERNAME` | Account username |
 | `BOT_PASSWORD` | Account password |
-| `API_PORT` | Port for the API/bot server (default: 3000) |
-| `DASHBOARD_PORT` | Port for the dashboard UI (default: 8080) |
+| `PORT` | Single port for both API and dashboard (default: 3000) |
 | `SESSION_SECRET` | Secret for session signing |
 
 ## Architecture decisions
