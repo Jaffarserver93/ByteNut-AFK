@@ -51,14 +51,12 @@ const RELOAD_INTERVAL_MS = 60_000;
 const LOGIN_TIMEOUT_MS = 30_000;
 
 const CHROME_ARGS = [
-  "--headless=new",
   "--no-sandbox",
   "--disable-setuid-sandbox",
   "--disable-dev-shm-usage",
   "--disable-gpu",
-  "--disable-gl-drawing-for-tests",
+  "--disable-software-rasterizer",
   "--window-size=1280,800",
-  "--remote-debugging-address=0.0.0.0",
   "--no-first-run",
   "--no-default-browser-check",
   "--disable-extensions",
@@ -70,6 +68,7 @@ const CHROME_ARGS = [
   "--safebrowsing-disable-auto-update",
   "--password-store=basic",
   "--use-mock-keychain",
+  "--disable-blink-features=AutomationControlled",
 ];
 
 async function which(bin: string): Promise<string | null> {
@@ -205,6 +204,13 @@ async function connectBrowser(retries = 3): Promise<{ browser: any; page: any }>
     addLog("warn", "No Chrome binary found in PATH — puppeteer-real-browser will use its bundled browser");
   }
 
+  const xvfbPath = await which("Xvfb");
+  if (!xvfbPath) {
+    addLog("warn", "Xvfb not found — Chrome may fail on a headless server. Install with: sudo apt-get install -y xvfb");
+  } else {
+    addLog("info", `Xvfb available at ${xvfbPath} — virtual display will be used`);
+  }
+
   let lastErr: any;
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -218,7 +224,7 @@ async function connectBrowser(retries = 3): Promise<{ browser: any; page: any }>
         customConfig: chromeBinary ? { chromePath: chromeBinary } : {},
         turnstile: true,
         connectOption: { defaultViewport: null },
-        disableXvfb: true,
+        disableXvfb: false,
         ignoreAllFlags: false,
       });
       return { browser: result.browser, page: result.page };
