@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: bot
+    description: AFK bot operations
 paths:
   /healthz:
     get:
@@ -24,6 +26,90 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /bot/status:
+    get:
+      operationId: getBotStatus
+      tags: [bot]
+      summary: Get bot status
+      description: Returns current bot state, uptime, and last action
+      responses:
+        "200":
+          description: Bot status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+  /bot/start:
+    post:
+      operationId: startBot
+      tags: [bot]
+      summary: Start the AFK bot
+      description: Launches puppeteer, logs in, and begins the reload loop
+      responses:
+        "200":
+          description: Bot started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+  /bot/stop:
+    post:
+      operationId: stopBot
+      tags: [bot]
+      summary: Stop the AFK bot
+      description: Closes the browser and stops the reload loop
+      responses:
+        "200":
+          description: Bot stopped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotStatus"
+  /bot/screenshot:
+    get:
+      operationId: getBotScreenshot
+      tags: [bot]
+      summary: Get live screenshot
+      description: Returns a base64-encoded PNG screenshot of the current browser view
+      responses:
+        "200":
+          description: Screenshot data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotScreenshot"
+  /bot/logs:
+    get:
+      operationId: getBotLogs
+      tags: [bot]
+      summary: Get audit logs
+      description: Returns the full audit log of bot actions
+      responses:
+        "200":
+          description: Audit log entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BotLogEntry"
+    delete:
+      operationId: clearBotLogs
+      tags: [bot]
+      summary: Clear audit logs
+      description: Clears all audit log entries
+      responses:
+        "200":
+          description: Logs cleared
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                required:
+                  - success
 components:
   schemas:
     HealthStatus:
@@ -33,4 +119,66 @@ components:
           type: string
       required:
         - status
-
+    BotStatus:
+      type: object
+      properties:
+        running:
+          type: boolean
+        state:
+          type: string
+          enum: [idle, logging_in, navigating, active, error, stopped]
+        uptimeSeconds:
+          type: number
+        startedAt:
+          type: string
+          nullable: true
+        currentUrl:
+          type: string
+          nullable: true
+        lastReloadAt:
+          type: string
+          nullable: true
+        reloadCount:
+          type: integer
+        errorMessage:
+          type: string
+          nullable: true
+      required:
+        - running
+        - state
+        - uptimeSeconds
+        - startedAt
+        - currentUrl
+        - lastReloadAt
+        - reloadCount
+        - errorMessage
+    BotScreenshot:
+      type: object
+      properties:
+        data:
+          type: string
+          nullable: true
+          description: Base64-encoded PNG image
+        capturedAt:
+          type: string
+          nullable: true
+      required:
+        - data
+        - capturedAt
+    BotLogEntry:
+      type: object
+      properties:
+        id:
+          type: string
+        timestamp:
+          type: string
+        level:
+          type: string
+          enum: [info, warn, error, success]
+        message:
+          type: string
+      required:
+        - id
+        - timestamp
+        - level
+        - message
