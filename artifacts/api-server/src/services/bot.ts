@@ -307,6 +307,20 @@ async function tryCfClickOnMainPage(page: any): Promise<boolean> {
   return false;
 }
 
+async function simulateHumanMouse(page: any): Promise<void> {
+  try {
+    // Move mouse in a natural curve across the viewport
+    const steps = [
+      { x: 100, y: 200 }, { x: 300, y: 150 }, { x: 500, y: 300 },
+      { x: 640, y: 360 }, { x: 800, y: 250 }, { x: 640, y: 400 },
+    ];
+    for (const { x, y } of steps) {
+      await page.mouse.move(x, y, { steps: 10 });
+      await sleep(80 + Math.floor(Math.random() * 120));
+    }
+  } catch {}
+}
+
 async function handleCloudflareChallenge(page: any): Promise<boolean> {
   const onChallenge = await isCloudflareChallenge(page);
   if (!onChallenge) return true;
@@ -319,10 +333,14 @@ async function handleCloudflareChallenge(page: any): Promise<boolean> {
   addLog("warn", `Cloudflare challenge detected — Page: "${title}" at ${url}`);
   await captureScreenshot();
 
-  // Phase 1: Wait up to 20 seconds for JS auto-resolve (no checkbox needed)
-  addLog("info", "Waiting for Cloudflare JS challenge to auto-resolve (up to 20s)...");
-  for (let i = 0; i < 20; i++) {
+  // Simulate human presence before anything else
+  await simulateHumanMouse(page);
+
+  // Phase 1: Wait up to 30 seconds for JS auto-resolve, screenshot every 5s
+  addLog("info", "Waiting for Cloudflare JS challenge to auto-resolve (up to 30s)...");
+  for (let i = 0; i < 30; i++) {
     await sleep(1000);
+    if (i % 5 === 4) await captureScreenshot();
     const still = await isCloudflareChallenge(page);
     if (!still) {
       addLog("success", `Cloudflare auto-resolved after ${i + 1}s`);
@@ -332,13 +350,37 @@ async function handleCloudflareChallenge(page: any): Promise<boolean> {
   }
 
   await captureScreenshot();
-  addLog("info", "Auto-resolve timed out — trying to click challenge elements...");
+  addLog("info", "Auto-resolve timed out — trying to interact with challenge...");
 
-  // Phase 2: Try clicking (up to 5 rounds)
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    addLog("info", `Cloudflare click attempt ${attempt}/5...`);
+  // Phase 2: Try clicking (up to 8 rounds)
+  for (let attempt = 1; attempt <= 8; attempt++) {
+    addLog("info", `Cloudflare interaction attempt ${attempt}/8...`);
+    await simulateHumanMouse(page);
 
-    let clicked = await tryCfClickOnMainPage(page);
+    // Try clicking turnstile iframe by bounding box
+    let clicked = false;
+    for (const ifrSel of CF_TURNSTILE_IFRAME_SELECTORS) {
+      try {
+        const ifrEl = await page.$(ifrSel);
+        if (!ifrEl) continue;
+        const box = await ifrEl.boundingBox();
+        if (box && box.width > 0 && box.height > 0) {
+          // Click the centre of the iframe (where the checkbox is)
+          const cx = box.x + box.width / 2;
+          const cy = box.y + box.height / 2;
+          await page.mouse.move(cx, cy, { steps: 8 });
+          await sleep(200);
+          await page.mouse.click(cx, cy);
+          addLog("info", `Clicked turnstile iframe centre at (${Math.round(cx)}, ${Math.round(cy)})`);
+          clicked = true;
+          break;
+        }
+      } catch {}
+    }
+
+    if (!clicked) {
+      clicked = await tryCfClickOnMainPage(page);
+    }
 
     if (!clicked) {
       const frames = getAllFrames(page);
@@ -357,31 +399,38 @@ async function handleCloudflareChallenge(page: any): Promise<boolean> {
     }
 
     if (!clicked) {
-      addLog("warn", `Attempt ${attempt}: No clickable CF element found`);
+      addLog("warn", `Attempt ${attempt}: No clickable CF element found — waiting...`);
     }
 
-    await sleep(5000);
-    const still = await isCloudflareChallenge(page);
-    if (!still) {
-      addLog("success", `Cloudflare challenge passed on attempt ${attempt}`);
-      await captureScreenshot();
-      return true;
+    // Wait up to 8s checking every second
+    for (let w = 0; w < 8; w++) {
+      await sleep(1000);
+      const still = await isCloudflareChallenge(page);
+      if (!still) {
+        addLog("success", `Cloudflare challenge passed on attempt ${attempt}`);
+        await captureScreenshot();
+        return true;
+      }
     }
-
     await captureScreenshot();
   }
 
-  addLog("error", "Cloudflare could not be bypassed. Your server IP may be blocked by Cloudflare. Check the Live Preview for what the browser sees.");
+  addLog("error", "Cloudflare could not be bypassed. The Live Preview shows what the bot sees. Replit's IP may be flagged — try stopping and starting the bot again in a few minutes.");
   return false;
 }
 
 async function navigateTo(page: any, url: string, description: string): Promise<void> {
   addLog("info", `Navigating to ${description}: ${url}`);
-  await page.goto(url, { waitUntil: "domcontentloaded", timeout: LOGIN_TIMEOUT_MS });
+  // Use networkidle2 so Cloudflare's JS challenge has time to run before we check
+  await page.goto(url, { waitUntil: "networkidle2", timeout: 45_000 }).catch(async () => {
+    // Fallback: domcontentloaded if networkidle2 times out (e.g. CF keeps connections open)
+    addLog("info", "networkidle2 timed out — continuing with domcontentloaded fallback");
+  });
+  await captureScreenshot();
 
   const cfHandled = await handleCloudflareChallenge(page);
   if (!cfHandled) {
-    throw new Error(`Cloudflare challenge on ${description} could not be bypassed — try again later or check if the server IP is flagged`);
+    throw new Error(`Cloudflare challenge on ${description} could not be bypassed — try stopping and starting the bot again in a few minutes`);
   }
 }
 
@@ -415,12 +464,16 @@ async function tryClick(page: any, selectors: string[]): Promise<boolean> {
 async function captureScreenshot(): Promise<void> {
   if (!pageInstance) return;
   try {
-    const buf: Buffer = await pageInstance.screenshot({
+    const raw = await pageInstance.screenshot({
       type: "jpeg",
       quality: 70,
       fullPage: false,
     });
-    lastScreenshot = { data: buf.toString("base64"), capturedAt: new Date().toISOString() };
+    // puppeteer-extra may return a Uint8Array instead of a proper Buffer.
+    // Always coerce to Buffer so .toString("base64") works correctly.
+    const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as Uint8Array);
+    const base64 = buf.toString("base64");
+    lastScreenshot = { data: base64, capturedAt: new Date().toISOString() };
     emitScreenshot(lastScreenshot.data!, lastScreenshot.capturedAt!);
   } catch (err) {
     logger.warn({ err }, "[bot] screenshot failed");
@@ -540,6 +593,9 @@ export async function startBot(): Promise<BotStatus> {
 
       await pageInstance.setViewport({ width: 1280, height: 720 });
 
+      // Start screenshot loop immediately so the user can watch the login & CF challenge live
+      screenshotTimer = setInterval(captureScreenshot, 5_000);
+
       pageInstance.on("close", async () => {
         if (state === "active" || state === "navigating" || state === "logging_in") {
           addLog("warn", "Browser page closed unexpectedly — stopping bot");
@@ -613,6 +669,8 @@ export async function startBot(): Promise<BotStatus> {
       emitStatus(getStatus());
       addLog("success", `Now active on target page: ${targetUrl}`);
 
+      // Upgrade screenshot interval to 10s now that bot is active
+      if (screenshotTimer) { clearInterval(screenshotTimer); screenshotTimer = null; }
       reloadTimer = setInterval(doReload, RELOAD_INTERVAL_MS);
       screenshotTimer = setInterval(captureScreenshot, 10_000);
     } catch (err: any) {
