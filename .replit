@@ -33,7 +33,7 @@ args = "BASE_PATH=/ PORT=8080 NODE_ENV=production pnpm --filter @workspace/dashb
 waitForPort = 8080
 
 [agent]
-stack = "PNPM_WORKSPACE"
+stack = "BEST_EFFORT_FALLBACK"
 expertMode = true
 
 [postMerge]
