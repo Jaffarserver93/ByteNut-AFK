@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { 
   useGetBotStatus, getGetBotStatusQueryKey,
-  useGetBotScreenshot, getGetBotScreenshotQueryKey,
   useGetBotLogs, getGetBotLogsQueryKey,
   useStartBot, useStopBot, useClearBotLogs
 } from "@workspace/api-client-react";
@@ -9,18 +8,15 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Play, Square, Terminal, Image as ImageIcon, Activity, Clock, RefreshCw, Trash2, CheckCircle2, AlertTriangle, AlertCircle, Info } from "lucide-react";
+import { Play, Square, Terminal, Image as ImageIcon, Activity, Clock, RefreshCw, Trash2, CheckCircle2, AlertTriangle, AlertCircle, Info, Wifi, WifiOff } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
+import socket from "@/lib/socket";
 
 export default function Dashboard() {
   const queryClient = useQueryClient();
 
   const { data: status } = useGetBotStatus(undefined, { 
     query: { refetchInterval: 2000, queryKey: getGetBotStatusQueryKey() } 
-  });
-  
-  const { data: screenshot } = useGetBotScreenshot(undefined, { 
-    query: { refetchInterval: 5000, queryKey: getGetBotScreenshotQueryKey() } 
   });
   
   const { data: logs } = useGetBotLogs(undefined, { 
@@ -30,6 +26,33 @@ export default function Dashboard() {
   const startBot = useStartBot();
   const stopBot = useStopBot();
   const clearLogs = useClearBotLogs();
+
+  // Live screenshot via socket
+  const [liveScreenshot, setLiveScreenshot] = useState<{ data: string; capturedAt: string } | null>(null);
+  const [socketConnected, setSocketConnected] = useState(false);
+
+  useEffect(() => {
+    socket.on("connect", () => setSocketConnected(true));
+    socket.on("disconnect", () => setSocketConnected(false));
+    socket.on("screenshot", (payload: { data: string; capturedAt: string }) => {
+      setLiveScreenshot(payload);
+    });
+    socket.on("status", () => {
+      queryClient.invalidateQueries({ queryKey: getGetBotStatusQueryKey() });
+    });
+    socket.on("log", () => {
+      queryClient.invalidateQueries({ queryKey: getGetBotLogsQueryKey() });
+    });
+    setSocketConnected(socket.connected);
+
+    return () => {
+      socket.off("connect");
+      socket.off("disconnect");
+      socket.off("screenshot");
+      socket.off("status");
+      socket.off("log");
+    };
+  }, [queryClient]);
 
   const handleStart = () => {
     startBot.mutate(undefined, {
@@ -112,6 +135,8 @@ export default function Dashboard() {
     }
   };
 
+  const screenshotData = liveScreenshot;
+
   return (
     <div className="min-h-screen w-full bg-background text-foreground p-4 md:p-8 relative overflow-hidden flex flex-col">
       {/* Background glowing orb */}
@@ -126,9 +151,17 @@ export default function Dashboard() {
             </div>
             <h1 className="text-3xl md:text-4xl font-bold tracking-tight text-white">ByteNut AFK Bot</h1>
           </div>
-          <p className="text-muted-foreground bg-clip-text text-transparent bg-gradient-to-r from-muted-foreground to-primary/80 font-medium">
-            Persistent browser automation & monitoring
-          </p>
+          <div className="flex items-center gap-2 text-sm">
+            {socketConnected ? (
+              <span className="flex items-center gap-1 text-green-400">
+                <Wifi className="h-3.5 w-3.5" /> Live
+              </span>
+            ) : (
+              <span className="flex items-center gap-1 text-muted-foreground">
+                <WifiOff className="h-3.5 w-3.5" /> Connecting...
+              </span>
+            )}
+          </div>
         </header>
 
         {/* Top Stats Row */}
@@ -211,16 +244,16 @@ export default function Dashboard() {
               <CardTitle className="text-lg font-medium flex items-center gap-2 text-white">
                 <ImageIcon className="h-5 w-5 text-primary" /> Live Preview
               </CardTitle>
-              {screenshot?.capturedAt && (
+              {screenshotData?.capturedAt && (
                 <span className="text-xs text-muted-foreground">
-                  Updated: {new Date(screenshot.capturedAt).toLocaleTimeString()}
+                  {new Date(screenshotData.capturedAt).toLocaleTimeString()}
                 </span>
               )}
             </CardHeader>
             <CardContent className="p-0 flex-1 relative bg-black/40 flex items-center justify-center min-h-[300px]">
-              {screenshot?.data ? (
+              {screenshotData?.data ? (
                 <img 
-                  src={`data:image/png;base64,${screenshot.data}`} 
+                  src={`data:image/png;base64,${screenshotData.data}`} 
                   alt="Bot Browser View" 
                   className="w-full h-full object-contain"
                 />

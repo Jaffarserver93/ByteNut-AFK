@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { logger } from "../lib/logger.js";
+import { emitScreenshot, emitStatus, emitLog } from "../lib/socket.js";
 
 export type BotState =
   | "idle"
@@ -59,6 +60,7 @@ function addLog(level: BotLogEntry["level"], message: string) {
     auditLog.length = MAX_LOG_ENTRIES;
   }
   logger.info({ level, message }, "[bot] %s", message);
+  emitLog(entry);
 }
 
 async function tryFillField(
@@ -102,6 +104,7 @@ async function captureScreenshot(): Promise<void> {
       data: buf.toString("base64"),
       capturedAt: new Date().toISOString(),
     };
+    emitScreenshot(lastScreenshot.data!, lastScreenshot.capturedAt!);
   } catch (err) {
     logger.warn({ err }, "[bot] screenshot failed");
   }
@@ -116,6 +119,7 @@ async function doReload(): Promise<void> {
     lastReloadAt = new Date();
     reloadCount++;
     await captureScreenshot();
+    emitStatus(getStatus());
     addLog("success", `Page reloaded successfully (#${reloadCount}) — ${targetUrl}`);
   } catch (err: any) {
     addLog("warn", `Reload failed: ${err?.message ?? String(err)}`);
@@ -149,24 +153,34 @@ export async function startBot(): Promise<BotStatus> {
   lastScreenshot = { data: null, capturedAt: null };
 
   addLog("info", "Launching browser...");
+  emitStatus(getStatus());
 
   (async () => {
     try {
       const { connect } = await import("puppeteer-real-browser");
 
       const result = await connect({
-        headless: false,
+        headless: "new" as any,
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
           "--disable-dev-shm-usage",
           "--disable-gpu",
           "--window-size=1280,800",
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--disable-extensions",
+          "--disable-background-networking",
+          "--disable-background-timer-throttling",
+          "--disable-client-side-phishing-detection",
+          "--disable-sync",
+          "--metrics-recording-only",
+          "--safebrowsing-disable-auto-update",
         ],
         customConfig: {},
         turnstile: true,
-        connectOption: {},
-        disableXvfb: false,
+        connectOption: { defaultViewport: null },
+        disableXvfb: true,
         ignoreAllFlags: false,
       });
 
@@ -175,7 +189,29 @@ export async function startBot(): Promise<BotStatus> {
 
       await pageInstance.setViewport({ width: 1280, height: 800 });
 
+      pageInstance.on("close", async () => {
+        if (state === "active") {
+          addLog("warn", "Browser page closed unexpectedly — stopping bot");
+          state = "error";
+          errorMessage = "Browser page closed unexpectedly";
+          emitStatus(getStatus());
+          await cleanupBrowser();
+        }
+      });
+
+      browserInstance.on("disconnected", async () => {
+        if (state === "active") {
+          addLog("warn", "Browser disconnected — stopping bot");
+          state = "error";
+          errorMessage = "Browser disconnected";
+          emitStatus(getStatus());
+          await cleanupBrowser();
+        }
+      });
+
       addLog("info", `Navigating to login page: ${loginUrl}`);
+      emitStatus(getStatus());
+
       await pageInstance.goto(loginUrl, {
         waitUntil: "domcontentloaded",
         timeout: LOGIN_TIMEOUT_MS,
@@ -248,6 +284,7 @@ export async function startBot(): Promise<BotStatus> {
       addLog("success", `Login successful — redirected to: ${currentUrl}`);
 
       state = "navigating";
+      emitStatus(getStatus());
       addLog("info", `Navigating to target page: ${targetUrl}`);
 
       await pageInstance.goto(targetUrl, {
@@ -259,6 +296,7 @@ export async function startBot(): Promise<BotStatus> {
       lastReloadAt = new Date();
       reloadCount++;
       await captureScreenshot();
+      emitStatus(getStatus());
       addLog("success", `Now active on target page: ${targetUrl}`);
 
       reloadTimer = setInterval(doReload, RELOAD_INTERVAL_MS);
@@ -266,6 +304,7 @@ export async function startBot(): Promise<BotStatus> {
       state = "error";
       errorMessage = err?.message ?? String(err);
       addLog("error", `Bot error: ${errorMessage}`);
+      emitStatus(getStatus());
       await cleanupBrowser();
     }
   })();
@@ -299,6 +338,7 @@ export async function stopBot(): Promise<BotStatus> {
   state = "stopped";
   errorMessage = null;
   addLog("success", "Bot stopped successfully");
+  emitStatus(getStatus());
   return getStatus();
 }
 
