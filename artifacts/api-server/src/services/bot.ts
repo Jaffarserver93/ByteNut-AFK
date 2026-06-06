@@ -798,56 +798,111 @@ async function ensureOnTargetPage(page: any): Promise<void> {
 
 // ─── Auto-Renew Flow ──────────────────────────────────────────────────────────
 
-async function doRenewFlow(page: any): Promise<void> {
-  addLog("info", "Starting auto-renew flow...");
-  await captureScreenshot();
-
-  // Step 1: Click "RENEW SERVER" in the sidebar
-  let renewClicked = false;
-
-  // Try CSS selector first
+async function clickRenewSidebarButton(page: any): Promise<boolean> {
+  // CSS selector (fastest)
   for (const sel of [".renew-server-menu-item", "li.renew-server-menu-item", 'li[class*="renew"]']) {
     try {
       const el = await page.$(sel);
-      if (el) { await el.click(); renewClicked = true; break; }
-    } catch {}
-  }
-
-  // Text-based fallback
-  if (!renewClicked) {
-    try {
-      renewClicked = await page.evaluate(() => {
-        const items = Array.from(document.querySelectorAll("li, button, a"));
-        for (const el of items) {
-          const txt = (el as HTMLElement).innerText ?? "";
-          if (txt.trim().toUpperCase().includes("RENEW SERVER")) {
-            (el as HTMLElement).click();
-            return true;
-          }
+      if (el) {
+        const box = await el.boundingBox();
+        if (box && box.width > 0 && box.height > 0) {
+          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
+          await sleep(150);
+          await el.click();
+          return true;
         }
-        return false;
-      });
+      }
     } catch {}
   }
+  // Text-based fallback
+  try {
+    const clicked: boolean = await page.evaluate(() => {
+      const items = Array.from(document.querySelectorAll("li, button, a"));
+      for (const el of items) {
+        const txt = (el as HTMLElement).innerText ?? "";
+        if (txt.trim().toUpperCase().includes("RENEW SERVER")) {
+          (el as HTMLElement).click();
+          return true;
+        }
+      }
+      return false;
+    });
+    if (clicked) return true;
+  } catch {}
+  return false;
+}
 
+async function readClockTimeFromPage(page: any): Promise<string | null> {
+  try {
+    const text: string | null = await page.evaluate(() => {
+      const el = document.querySelector(".clock-time");
+      return el ? (el as HTMLElement).innerText.trim() : null;
+    });
+    return text ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function doRenewFlow(page: any): Promise<void> {
+  // ── Step 1: Click RENEW SERVER sidebar button ─────────────────────────────
+  addLog("info", "Clicking left sidebar RENEW SERVER...");
+  await captureScreenshot();
+
+  const renewClicked = await clickRenewSidebarButton(page);
   if (!renewClicked) {
-    addLog("warn", "Could not find RENEW SERVER button — skipping auto-renew this cycle");
+    addLog("warn", "Could not find RENEW SERVER sidebar button — skipping this cycle");
     return;
   }
 
-  addLog("info", "Clicked RENEW SERVER — waiting for form to load...");
+  addLog("info", "Clicked left sidebar RENEW SERVER — waiting for modal to load...");
   await sleep(2500);
   await captureScreenshot();
 
-  // Step 2: Wait for Turnstile to appear & auto-solve (puppeteer-real-browser handles this)
-  try {
-    await page.waitForSelector('input[name="cf-turnstile-response"]', { timeout: 10_000 });
-  } catch {
-    addLog("warn", "Renew form / Turnstile did not appear — page layout may have changed");
+  // ── Step 2: Read time remaining from the modal page ───────────────────────
+  const clockText = await readClockTimeFromPage(page);
+  let modalMinutes: number | null = null;
+
+  if (clockText) {
+    const parts = clockText.split(":").map((p) => parseInt(p, 10));
+    if (parts.length === 2 && !Number.isNaN(parts[0]) && !Number.isNaN(parts[1])) {
+      modalMinutes = parts[0] * 60 + parts[1];
+    } else {
+      modalMinutes = parseTimeToMinutes(clockText);
+    }
+    addLog("info", `Time remaining (modal): ${clockText}`);
+    // Keep global timeRemainingMinutes in sync
+    if (modalMinutes !== null) {
+      timeRemainingMinutes = modalMinutes;
+      emitStatus(getStatus());
+    }
+  } else {
+    addLog("info", "Could not read time remaining from modal");
+  }
+
+  // ── Step 3: Only extend if time is critically low (< 20 min) ─────────────
+  if (modalMinutes === null || modalMinutes >= 20) {
+    if (modalMinutes !== null && modalMinutes < 60) {
+      addLog("warn", `Server time under 1 hour (${modalMinutes}m) — auto-renew will trigger at < 20min`);
+    }
+    // Navigate back to target page so the sidebar is usable next cycle
+    const targetUrl = process.env["TARGET_URL"] ?? "";
+    try {
+      await navigateTo(page, targetUrl, "target page (back from renew modal)");
+    } catch {}
     return;
   }
 
-  addLog("info", "Renew form loaded — waiting for Turnstile auto-solve (up to 25s)...");
+  addLog("warn", `⚠️ Only ${modalMinutes}m remaining — solving Turnstile & extending...`);
+
+  // ── Step 4: Wait for Turnstile to auto-solve ──────────────────────────────
+  try {
+    await page.waitForSelector('input[name="cf-turnstile-response"]', { timeout: 10_000 });
+  } catch {
+    addLog("warn", "Turnstile input not found in renew modal — skipping extend");
+    return;
+  }
+
   const solved = await waitForTurnstileAutoSolved(page, 25_000);
   if (!solved) {
     addLog("warn", "Turnstile not auto-solved — will retry on next cycle");
@@ -858,7 +913,7 @@ async function doRenewFlow(page: any): Promise<void> {
   await captureScreenshot();
   await sleep(500);
 
-  // Step 3: Find and click the Extend button
+  // ── Step 5: Click the Extend button ──────────────────────────────────────
   const candidates = await page.$$("button, a[href], input[type='button'], input[type='submit']");
   for (const el of candidates) {
     try {
@@ -866,7 +921,12 @@ async function doRenewFlow(page: any): Promise<void> {
       if (!box || box.width < 10 || box.height < 10) continue;
       const text: string = await page.evaluate((e: any) => (e.innerText ?? e.value ?? "").trim(), el);
       const lower = text.toLowerCase();
-      if (lower.includes("extend server") || lower.includes("+180") || lower.includes("extend time") || (lower.includes("extend") && lower.length < 60)) {
+      if (
+        lower.includes("extend server") ||
+        lower.includes("+180") ||
+        lower.includes("extend time") ||
+        (lower.includes("extend") && lower.length < 60)
+      ) {
         addLog("info", `Clicking: "${text.slice(0, 80)}"`);
         await el.click();
         await sleep(2500);
@@ -921,13 +981,8 @@ async function doReload(): Promise<void> {
     emitStatus(getStatus());
     addLog("success", `Cycle #${reloadCount} complete — ${targetUrl}`);
 
-    // Step 4: Auto-renew if time is critically low (< 20 min)
-    if (minutes !== null && minutes < 20) {
-      addLog("warn", `⚠️ Only ${minutes}m remaining — triggering auto-renew!`);
-      await doRenewFlow(pageInstance);
-    } else if (minutes !== null && minutes < 60) {
-      addLog("warn", `Server time under 1 hour (${minutes}m) — auto-renew will trigger at < 20min`);
-    }
+    // Step 4: Always click RENEW SERVER sidebar to check time & extend if < 20 min
+    await doRenewFlow(pageInstance);
 
     await captureScreenshot();
     emitStatus(getStatus());
