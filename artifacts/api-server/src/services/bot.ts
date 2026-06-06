@@ -907,13 +907,8 @@ async function doReload(): Promise<void> {
     emitStatus(getStatus());
     addLog("success", `Cycle #${reloadCount} complete — ${targetUrl}`);
 
-    // Step 4: Auto-renew if time is critically low (< 20 min)
-    if (minutes !== null && minutes < 20) {
-      addLog("warn", `⚠️ Only ${minutes}m remaining — triggering auto-renew!`);
-      await doRenewFlow(pageInstance);
-    } else if (minutes !== null && minutes < 60) {
-      addLog("warn", `Server time under 1 hour (${minutes}m) — auto-renew at < 20min`);
-    }
+    // Step 4: Always click RENEW SERVER to keep the server alive every cycle
+    await doRenewFlow(pageInstance);
 
     await captureScreenshot();
     emitStatus(getStatus());
