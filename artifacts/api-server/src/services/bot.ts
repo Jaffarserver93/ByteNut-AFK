@@ -681,26 +681,40 @@ function parseTimeToMinutes(text: string): number | null {
 
 async function extractTimeRemainingMinutes(page: any): Promise<number | null> {
   try {
+    // Primary: read from .clock-time span (e.g. "02:56" meaning 2h 56m)
+    const clockText: string | null = await page.evaluate(() => {
+      const el = document.querySelector(".clock-time");
+      return el ? (el as HTMLElement).innerText.trim() : null;
+    });
+
+    if (clockText) {
+      // Format "HH:MM" — convert to total minutes
+      const parts = clockText.split(":").map((p) => parseInt(p, 10));
+      if (parts.length === 2 && !Number.isNaN(parts[0]) && !Number.isNaN(parts[1])) {
+        return parts[0] * 60 + parts[1];
+      }
+      // Format "H h M m" or plain minutes
+      const parsed = parseTimeToMinutes(clockText);
+      if (parsed !== null) return parsed;
+    }
+
+    // Fallback: scan for "FREE TIME LEFT" text
     const rawText: string = await page.evaluate(() => {
-      // Find the element whose text contains "FREE TIME LEFT" and return nearby text
       const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
       let node: Text | null;
       while ((node = walker.nextNode() as Text | null)) {
         if (node.textContent?.toLowerCase().includes("free time left")) {
-          // Walk up and grab the parent's full innerText (contains the value too)
           return (node.parentElement?.closest("[class]") as HTMLElement | null)?.innerText
             ?? node.parentElement?.innerText
             ?? "";
         }
       }
-      // Fallback: scan full body text
       return (document.body as HTMLElement).innerText ?? "";
     });
 
     const match = rawText.match(/free\s+time\s+left[:\s\n]+([0-9]+\s*h\s*[0-9]*\s*m?|[0-9]+\s*m)/i);
     if (match) return parseTimeToMinutes(match[1]);
 
-    // Broader fallback
     const fallback = rawText.match(/([0-9]+\s*h\s*[0-9]+\s*m|[0-9]+\s*h|[0-9]+\s*m)\s*(remaining|left)/i);
     if (fallback) return parseTimeToMinutes(fallback[1]);
 
@@ -907,8 +921,13 @@ async function doReload(): Promise<void> {
     emitStatus(getStatus());
     addLog("success", `Cycle #${reloadCount} complete — ${targetUrl}`);
 
-    // Step 4: Always click RENEW SERVER to keep the server alive every cycle
-    await doRenewFlow(pageInstance);
+    // Step 4: Auto-renew if time is critically low (< 20 min)
+    if (minutes !== null && minutes < 20) {
+      addLog("warn", `⚠️ Only ${minutes}m remaining — triggering auto-renew!`);
+      await doRenewFlow(pageInstance);
+    } else if (minutes !== null && minutes < 60) {
+      addLog("warn", `Server time under 1 hour (${minutes}m) — auto-renew will trigger at < 20min`);
+    }
 
     await captureScreenshot();
     emitStatus(getStatus());
