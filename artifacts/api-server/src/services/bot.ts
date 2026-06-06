@@ -334,59 +334,78 @@ async function handleEmbeddedTurnstile(page: any): Promise<boolean> {
 }
 
 /**
+ * Polls the hidden Turnstile response input until it has a value (meaning
+ * puppeteer-real-browser auto-solved it), or until timeoutMs is exceeded.
+ */
+async function waitForTurnstileAutoSolved(page: any, timeoutMs = 20_000): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const val: string = await page.evaluate(() => {
+        const input = document.querySelector('input[name="cf-turnstile-response"]') as HTMLInputElement | null;
+        return input?.value ?? "";
+      });
+      if (val && val.length > 10) return true;
+    } catch {}
+    await sleep(500);
+  }
+  return false;
+}
+
+/**
  * After reaching the target page, interact with the page-specific actions:
- * solve the embedded Turnstile and click "Extend Server Time" if present.
+ * wait for Turnstile to be auto-solved (puppeteer-real-browser handles this),
+ * then click "Extend Server Time" if present.
  */
 async function handleTargetPageActions(page: any): Promise<void> {
-  const extendSelectors = [
-    'button:has-text("Extend")',
-    'a:has-text("Extend")',
-    '[class*="extend" i]',
-    'button[class*="btn" i]',
-    'button.btn-success',
-    'button.btn-primary',
-    "button.bg-green",
-    'button[type="submit"]',
-  ];
-
-  // Check if there's a Turnstile to solve
+  // ── Step 1: Handle Turnstile ──────────────────────────────────────────────
   try {
     const turnstileInput = await page.$('input[name="cf-turnstile-response"]');
     if (turnstileInput) {
-      addLog("info", "Embedded Turnstile detected on target page — solving...");
-      const solved = await handleEmbeddedTurnstile(page);
-      if (solved) {
-        addLog("success", "Embedded Turnstile solved");
-        await sleep(1500);
-        await captureScreenshot();
+      // First check if it's already solved
+      const currentVal: string = await page.evaluate((el: any) => el.value ?? "", turnstileInput);
+      if (currentVal && currentVal.length > 10) {
+        addLog("info", "Embedded Turnstile already solved — proceeding");
       } else {
-        addLog("warn", "Could not solve embedded Turnstile — will retry on next reload");
+        addLog("info", "Embedded Turnstile detected — waiting for puppeteer-real-browser to auto-solve (up to 20s)...");
+        await captureScreenshot();
+        const solved = await waitForTurnstileAutoSolved(page, 20_000);
+        if (!solved) {
+          addLog("warn", "Turnstile not auto-solved after 20s — skipping Extend button this cycle");
+          return; // Do NOT click Extend if Turnstile isn't solved
+        }
+        addLog("success", "Turnstile auto-solved — proceeding to click Extend button");
+        await captureScreenshot();
       }
     }
   } catch {}
 
-  // Try to click "Extend Server Time" or similar button
+  // ── Step 2: Click the Extend / Renew button ───────────────────────────────
+  // Only match actual interactive elements (button, a), check innerText directly
+  // to avoid matching parent container text.
   try {
-    for (const sel of extendSelectors) {
+    const candidates = await page.$$("button, a[href], input[type='button'], input[type='submit']");
+    for (const el of candidates) {
       try {
-        const el = await page.$(sel);
-        if (!el) continue;
         const box = await el.boundingBox();
-        if (box && box.width > 0 && box.height > 0) {
-          const text: string = await page.evaluate((e: any) => e.textContent ?? "", el);
-          if (
-            text.toLowerCase().includes("extend") ||
-            text.toLowerCase().includes("renew") ||
-            text.toLowerCase().includes("+") ||
-            text.toLowerCase().includes("time")
-          ) {
-            addLog("info", `Clicking action button: "${text.trim().slice(0, 60)}"`);
-            await el.click();
-            await sleep(2000);
-            await captureScreenshot();
-            addLog("success", "Action button clicked successfully");
-            return;
-          }
+        if (!box || box.width < 10 || box.height < 10) continue;
+
+        // Use innerText so we get only what's visible, not child-element noise
+        const text: string = await page.evaluate((e: any) => (e.innerText ?? e.value ?? "").trim(), el);
+        const lower = text.toLowerCase();
+
+        if (
+          lower.includes("extend server") ||
+          lower.includes("+180") ||
+          lower.includes("extend time") ||
+          (lower.includes("extend") && lower.length < 60)
+        ) {
+          addLog("info", `Clicking: "${text.slice(0, 80)}"`);
+          await el.click();
+          await sleep(2000);
+          await captureScreenshot();
+          addLog("success", "Extend Server Time clicked successfully");
+          return;
         }
       } catch {}
     }
@@ -674,55 +693,38 @@ async function doReload(): Promise<void> {
 }
 
 async function connectBrowser(): Promise<{ browser: any; page: any }> {
-  const puppeteerExtra = await import("puppeteer-extra");
-  const StealthPlugin = await import("puppeteer-extra-plugin-stealth");
-  const puppeteer = await import("puppeteer");
-
-  const pExtra = puppeteerExtra.default;
-  pExtra.use(StealthPlugin.default());
-
   const chromeBinary = await findChromeBinary();
 
-  const launchOptions: Record<string, any> = {
-    headless: true,
+  const connectOptions: Record<string, any> = {
+    // puppeteer-real-browser uses Xvfb automatically on headless Linux servers
+    headless: false,
     args: CHROME_LAUNCH_ARGS,
-    ignoreHTTPSErrors: true,
-    defaultViewport: { width: 1280, height: 720 },
+    // Auto-solve embedded Cloudflare Turnstile widgets
+    turnstile: true,
+    // Don't randomise fingerprint — it can break Turnstile's bot-detection
+    fingerprint: false,
+    connectOption: {
+      defaultViewport: { width: 1280, height: 720 },
+      ignoreHTTPSErrors: true,
+    },
+    skipTarget: [],
   };
 
   if (chromeBinary) {
     addLog("info", `Using system Chrome: ${chromeBinary}`);
-    launchOptions["executablePath"] = chromeBinary;
+    connectOptions["customConfig"] = { executablePath: chromeBinary };
   } else {
-    let bundledPath: string;
-    try {
-      bundledPath = puppeteer.default.executablePath();
-    } catch {
-      throw new Error(
-        "No valid Chrome binary found and Puppeteer's bundled Chromium is not downloaded. " +
-        "On your Ubuntu server run: pnpm install   (this downloads Chromium, ~170MB, once)"
-      );
-    }
-    addLog("info", `No valid system Chrome found (snap stubs skipped) — using bundled Chromium: ${bundledPath}`);
-    launchOptions["executablePath"] = bundledPath;
+    // Fallback: let puppeteer-real-browser find Chrome itself
+    addLog("info", "No system Chrome found — letting puppeteer-real-browser locate Chrome");
   }
 
-  addLog("info", "Launching browser with stealth mode...");
-  const browser = await pExtra.launch(launchOptions);
-  const pages = await browser.pages();
-  const page = pages.length > 0 ? pages[0] : await browser.newPage();
+  addLog("info", "Launching browser with puppeteer-real-browser (turnstile: true)...");
 
-  await page.setUserAgent(
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-  );
+  const { connect } = await import("puppeteer-real-browser");
+  const { browser, page } = await connect(connectOptions);
 
-  await page.setExtraHTTPHeaders({
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Cache-Control": "max-age=0",
-    "Upgrade-Insecure-Requests": "1",
-  });
+  // Ensure viewport is set (connectOption.defaultViewport may be ignored in some versions)
+  try { await page.setViewport({ width: 1280, height: 720 }); } catch {}
 
   addLog("success", "Browser launched successfully");
   return { browser, page };
