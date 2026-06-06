@@ -6,38 +6,38 @@ import {
   getScreenshot,
   getLogs,
   clearLogs,
+  diagnose,
 } from "../services/bot.js";
 
 const router: IRouter = Router();
 
 router.get("/bot/status", async (_req, res) => {
-  const status = getStatus();
-  res.json(status);
+  res.json(getStatus());
 });
 
 router.post("/bot/start", async (_req, res) => {
-  const status = await startBot();
-  res.json(status);
+  res.json(await startBot());
 });
 
 router.post("/bot/stop", async (_req, res) => {
-  const status = await stopBot();
-  res.json(status);
+  res.json(await stopBot());
 });
 
 router.get("/bot/screenshot", async (_req, res) => {
-  const screenshot = getScreenshot();
-  res.json(screenshot);
+  res.json(getScreenshot());
 });
 
 router.get("/bot/logs", async (_req, res) => {
-  const logs = getLogs();
-  res.json(logs);
+  res.json(getLogs());
 });
 
 router.delete("/bot/logs", async (_req, res) => {
   clearLogs();
   res.json({ success: true });
+});
+
+router.get("/bot/diagnose", async (_req, res) => {
+  res.json(await diagnose());
 });
 
 export default router;
