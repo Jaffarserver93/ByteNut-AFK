@@ -179,6 +179,18 @@ ok "API server built"
 head "Starting Bot Server"
 # ============================================================
 
+# Kill any process already holding the port so re-runs don't hit EADDRINUSE
+if command -v fuser &>/dev/null; then
+  fuser -k "${PORT}/tcp" 2>/dev/null && log "Killed existing process on port $PORT" || true
+elif command -v lsof &>/dev/null; then
+  OLD_PID=$(lsof -ti tcp:"$PORT" 2>/dev/null || true)
+  [ -n "$OLD_PID" ] && kill "$OLD_PID" 2>/dev/null && log "Killed PID $OLD_PID on port $PORT" || true
+else
+  # Fallback: kill any node process running dist/index.mjs
+  pkill -f "dist/index\.mjs" 2>/dev/null && log "Killed existing bot process" || true
+fi
+sleep 1
+
 cleanup() {
   echo ""
   log "Shutting down..."
