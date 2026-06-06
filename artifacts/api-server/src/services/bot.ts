@@ -30,6 +30,8 @@ export interface BotStatus {
   lastReloadAt: string | null;
   reloadCount: number;
   errorMessage: string | null;
+  timeRemainingMinutes: number | null;
+  lastRenewAt: string | null;
 }
 
 export interface BotScreenshot {
@@ -182,8 +184,10 @@ let pageInstance: any = null;
 let state: BotState = "stopped";
 let startedAt: Date | null = null;
 let lastReloadAt: Date | null = null;
+let lastRenewAt: Date | null = null;
 let reloadCount = 0;
 let errorMessage: string | null = null;
+let timeRemainingMinutes: number | null = null;
 let reloadTimer: ReturnType<typeof setInterval> | null = null;
 let screenshotTimer: ReturnType<typeof setInterval> | null = null;
 let lastScreenshot: BotScreenshot = { data: null, capturedAt: null };
@@ -664,31 +668,257 @@ async function captureScreenshot(): Promise<void> {
   }
 }
 
+// ─── Time Remaining Helpers ───────────────────────────────────────────────────
+
+function parseTimeToMinutes(text: string): number | null {
+  const hMatch = text.match(/(\d+)\s*h/i);
+  const mMatch = text.match(/(\d+)\s*m/i);
+  if (!hMatch && !mMatch) return null;
+  const hours = hMatch ? parseInt(hMatch[1], 10) : 0;
+  const mins  = mMatch ? parseInt(mMatch[1], 10) : 0;
+  return hours * 60 + mins;
+}
+
+async function extractTimeRemainingMinutes(page: any): Promise<number | null> {
+  try {
+    const rawText: string = await page.evaluate(() => {
+      // Find the element whose text contains "FREE TIME LEFT" and return nearby text
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let node: Text | null;
+      while ((node = walker.nextNode() as Text | null)) {
+        if (node.textContent?.toLowerCase().includes("free time left")) {
+          // Walk up and grab the parent's full innerText (contains the value too)
+          return (node.parentElement?.closest("[class]") as HTMLElement | null)?.innerText
+            ?? node.parentElement?.innerText
+            ?? "";
+        }
+      }
+      // Fallback: scan full body text
+      return (document.body as HTMLElement).innerText ?? "";
+    });
+
+    const match = rawText.match(/free\s+time\s+left[:\s\n]+([0-9]+\s*h\s*[0-9]*\s*m?|[0-9]+\s*m)/i);
+    if (match) return parseTimeToMinutes(match[1]);
+
+    // Broader fallback
+    const fallback = rawText.match(/([0-9]+\s*h\s*[0-9]+\s*m|[0-9]+\s*h|[0-9]+\s*m)\s*(remaining|left)/i);
+    if (fallback) return parseTimeToMinutes(fallback[1]);
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// ─── Login Helper ─────────────────────────────────────────────────────────────
+
+async function doLogin(page: any): Promise<void> {
+  const loginUrl = process.env["LOGIN_URL"] ?? "";
+  const username = process.env["BOT_USERNAME"] ?? "";
+  const password = process.env["BOT_PASSWORD"] ?? "";
+
+  await navigateTo(page, loginUrl, "login page");
+  addLog("info", "Filling in login credentials...");
+
+  const usernameFilled = await tryFillField(page, [
+    'input[name="username"]', 'input[name="email"]',
+    'input[type="email"]', 'input[type="text"]',
+    "#username", "#email", "#user",
+    '[placeholder*="user" i]', '[placeholder*="email" i]',
+  ], username);
+
+  if (!usernameFilled) throw new Error("Could not find username/email input field on login page");
+
+  const passwordFilled = await tryFillField(page, [
+    'input[type="password"]', 'input[name="password"]',
+    "#password", "#pass", '[placeholder*="password" i]',
+  ], password);
+
+  if (!passwordFilled) throw new Error("Could not find password input field on login page");
+
+  addLog("info", "Submitting login form...");
+
+  const submitted = await tryClick(page, [
+    'button[type="submit"]', 'input[type="submit"]',
+    "button.login", ".btn-login", ".login-btn", ".login-button",
+    '[data-testid="login-button"]', 'form button',
+  ]);
+
+  if (!submitted) await page.keyboard.press("Enter");
+
+  await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: LOGIN_TIMEOUT_MS }).catch(() => {});
+  await handleCloudflareChallenge(page);
+
+  const currentUrl = page.url();
+  addLog("success", `Login successful — redirected to: ${currentUrl}`);
+}
+
+// ─── Page Monitor ─────────────────────────────────────────────────────────────
+
+async function ensureOnTargetPage(page: any): Promise<void> {
+  const targetUrl = process.env["TARGET_URL"] ?? "";
+  let currentUrl = "";
+  try { currentUrl = page.url(); } catch {}
+
+  const targetBase = targetUrl.split("?")[0];
+  if (currentUrl && (currentUrl === targetUrl || currentUrl.startsWith(targetBase))) return;
+
+  addLog("warn", `Bot drifted off target (now at: ${currentUrl}) — redirecting...`);
+  await captureScreenshot();
+
+  // Re-login if session expired
+  if (currentUrl.includes("/auth/login") || currentUrl.includes("/login")) {
+    addLog("info", "Session expired — re-logging in...");
+    state = "logging_in";
+    emitStatus(getStatus());
+    await doLogin(page);
+    state = "navigating";
+    emitStatus(getStatus());
+  }
+
+  await navigateTo(page, targetUrl, "target page");
+  state = "active";
+  emitStatus(getStatus());
+  addLog("success", "Returned to target page");
+}
+
+// ─── Auto-Renew Flow ──────────────────────────────────────────────────────────
+
+async function doRenewFlow(page: any): Promise<void> {
+  addLog("info", "Starting auto-renew flow...");
+  await captureScreenshot();
+
+  // Step 1: Click "RENEW SERVER" in the sidebar
+  let renewClicked = false;
+
+  // Try CSS selector first
+  for (const sel of [".renew-server-menu-item", "li.renew-server-menu-item", 'li[class*="renew"]']) {
+    try {
+      const el = await page.$(sel);
+      if (el) { await el.click(); renewClicked = true; break; }
+    } catch {}
+  }
+
+  // Text-based fallback
+  if (!renewClicked) {
+    try {
+      renewClicked = await page.evaluate(() => {
+        const items = Array.from(document.querySelectorAll("li, button, a"));
+        for (const el of items) {
+          const txt = (el as HTMLElement).innerText ?? "";
+          if (txt.trim().toUpperCase().includes("RENEW SERVER")) {
+            (el as HTMLElement).click();
+            return true;
+          }
+        }
+        return false;
+      });
+    } catch {}
+  }
+
+  if (!renewClicked) {
+    addLog("warn", "Could not find RENEW SERVER button — skipping auto-renew this cycle");
+    return;
+  }
+
+  addLog("info", "Clicked RENEW SERVER — waiting for form to load...");
+  await sleep(2500);
+  await captureScreenshot();
+
+  // Step 2: Wait for Turnstile to appear & auto-solve (puppeteer-real-browser handles this)
+  try {
+    await page.waitForSelector('input[name="cf-turnstile-response"]', { timeout: 10_000 });
+  } catch {
+    addLog("warn", "Renew form / Turnstile did not appear — page layout may have changed");
+    return;
+  }
+
+  addLog("info", "Renew form loaded — waiting for Turnstile auto-solve (up to 25s)...");
+  const solved = await waitForTurnstileAutoSolved(page, 25_000);
+  if (!solved) {
+    addLog("warn", "Turnstile not auto-solved — will retry on next cycle");
+    return;
+  }
+
+  addLog("success", "Turnstile solved — clicking Extend button...");
+  await captureScreenshot();
+  await sleep(500);
+
+  // Step 3: Find and click the Extend button
+  const candidates = await page.$$("button, a[href], input[type='button'], input[type='submit']");
+  for (const el of candidates) {
+    try {
+      const box = await el.boundingBox();
+      if (!box || box.width < 10 || box.height < 10) continue;
+      const text: string = await page.evaluate((e: any) => (e.innerText ?? e.value ?? "").trim(), el);
+      const lower = text.toLowerCase();
+      if (lower.includes("extend server") || lower.includes("+180") || lower.includes("extend time") || (lower.includes("extend") && lower.length < 60)) {
+        addLog("info", `Clicking: "${text.slice(0, 80)}"`);
+        await el.click();
+        await sleep(2500);
+        await captureScreenshot();
+        lastRenewAt = new Date();
+        addLog("success", "✅ Server time extended successfully! (+180 min)");
+        emitStatus(getStatus());
+        return;
+      }
+    } catch {}
+  }
+
+  addLog("warn", "Extend button not found after Turnstile solved — skipping");
+}
+
+// ─── Main Reload Cycle ────────────────────────────────────────────────────────
+
 async function doReload(): Promise<void> {
   if (!pageInstance) return;
   try {
     const targetUrl = process.env["TARGET_URL"] ?? "";
-    addLog("info", `Reloading target page (reload #${reloadCount + 1})`);
+
+    // Step 1: Ensure we're still on the target page (handles drift + session expiry)
+    await ensureOnTargetPage(pageInstance);
+
+    // Step 2: Reload to refresh content
+    addLog("info", `Refreshing target page (cycle #${reloadCount + 1})`);
     await pageInstance.reload({ waitUntil: "domcontentloaded", timeout: LOGIN_TIMEOUT_MS });
 
     const cfHandled = await handleCloudflareChallenge(pageInstance);
     if (!cfHandled) {
-      addLog("warn", "Cloudflare challenge appeared on reload — could not bypass, will retry next cycle");
+      addLog("warn", "Cloudflare appeared on reload — will retry next cycle");
       return;
+    }
+
+    await sleep(1500); // Let Vue/React page hydrate
+    await captureScreenshot();
+
+    // Step 3: Read time remaining from the page
+    const minutes = await extractTimeRemainingMinutes(pageInstance);
+    if (minutes !== null) {
+      timeRemainingMinutes = minutes;
+      const h = Math.floor(minutes / 60);
+      const m = minutes % 60;
+      addLog("info", `Server time remaining: ${h > 0 ? `${h}h ` : ""}${m}m`);
+    } else {
+      addLog("info", "Could not read server time remaining from page");
     }
 
     lastReloadAt = new Date();
     reloadCount++;
-    await captureScreenshot();
     emitStatus(getStatus());
-    addLog("success", `Page reloaded successfully (#${reloadCount}) — ${targetUrl}`);
+    addLog("success", `Cycle #${reloadCount} complete — ${targetUrl}`);
 
-    // Handle any embedded Turnstile + action buttons on the target page
-    await handleTargetPageActions(pageInstance);
+    // Step 4: Auto-renew if time is critically low (< 20 min)
+    if (minutes !== null && minutes < 20) {
+      addLog("warn", `⚠️ Only ${minutes}m remaining — triggering auto-renew!`);
+      await doRenewFlow(pageInstance);
+    } else if (minutes !== null && minutes < 60) {
+      addLog("warn", `Server time under 1 hour (${minutes}m) — auto-renew at < 20min`);
+    }
+
     await captureScreenshot();
     emitStatus(getStatus());
   } catch (err: any) {
-    addLog("warn", `Reload failed: ${err?.message ?? String(err)}`);
+    addLog("warn", `Cycle failed: ${err?.message ?? String(err)}`);
   }
 }
 
@@ -752,6 +982,8 @@ export async function startBot(): Promise<BotStatus> {
   startedAt = new Date();
   reloadCount = 0;
   lastReloadAt = null;
+  lastRenewAt = null;
+  timeRemainingMinutes = null;
   errorMessage = null;
   lastScreenshot = { data: null, capturedAt: null };
   addLog("info", "Launching browser...");
@@ -788,46 +1020,8 @@ export async function startBot(): Promise<BotStatus> {
         }
       });
 
-      await navigateTo(pageInstance, loginUrl, "login page");
-      addLog("info", "Filling in login credentials...");
-
-      const usernameFilled = await tryFillField(pageInstance, [
-        'input[name="username"]',
-        'input[name="email"]',
-        'input[type="email"]',
-        'input[type="text"]',
-        "#username", "#email", "#user",
-        '[placeholder*="user" i]',
-        '[placeholder*="email" i]',
-      ], username);
-
-      if (!usernameFilled) throw new Error("Could not find username/email input field on login page");
-
-      const passwordFilled = await tryFillField(pageInstance, [
-        'input[type="password"]',
-        'input[name="password"]',
-        "#password", "#pass",
-        '[placeholder*="password" i]',
-      ], password);
-
-      if (!passwordFilled) throw new Error("Could not find password input field on login page");
-
-      addLog("info", "Submitting login form...");
-
-      const submitted = await tryClick(pageInstance, [
-        'button[type="submit"]', 'input[type="submit"]',
-        "button.login", ".btn-login", ".login-btn", ".login-button",
-        '[data-testid="login-button"]', 'form button',
-      ]);
-
-      if (!submitted) await pageInstance.keyboard.press("Enter");
-
-      await pageInstance.waitForNavigation({ waitUntil: "domcontentloaded", timeout: LOGIN_TIMEOUT_MS }).catch(() => {});
-
-      await handleCloudflareChallenge(pageInstance);
-
-      const currentUrl = pageInstance.url();
-      addLog("success", `Login successful — redirected to: ${currentUrl}`);
+      // Login
+      await doLogin(pageInstance);
 
       state = "navigating";
       emitStatus(getStatus());
@@ -841,10 +1035,20 @@ export async function startBot(): Promise<BotStatus> {
       emitStatus(getStatus());
       addLog("success", `Now active on target page: ${targetUrl}`);
 
-      // Handle embedded Turnstile + action buttons on first load
-      await handleTargetPageActions(pageInstance);
-      await captureScreenshot();
-      emitStatus(getStatus());
+      // Read initial time remaining
+      await sleep(1500);
+      const initMinutes = await extractTimeRemainingMinutes(pageInstance);
+      if (initMinutes !== null) {
+        timeRemainingMinutes = initMinutes;
+        const h = Math.floor(initMinutes / 60);
+        const m = initMinutes % 60;
+        addLog("info", `Server time remaining: ${h > 0 ? `${h}h ` : ""}${m}m`);
+        emitStatus(getStatus());
+        if (initMinutes < 20) {
+          addLog("warn", `⚠️ Only ${initMinutes}m remaining — triggering auto-renew immediately!`);
+          await doRenewFlow(pageInstance);
+        }
+      }
 
       // Upgrade screenshot interval to 10s now that bot is active
       if (screenshotTimer) { clearInterval(screenshotTimer); screenshotTimer = null; }
@@ -903,6 +1107,8 @@ export function getStatus(): BotStatus {
     lastReloadAt: lastReloadAt?.toISOString() ?? null,
     reloadCount,
     errorMessage,
+    timeRemainingMinutes,
+    lastRenewAt: lastRenewAt?.toISOString() ?? null,
   };
 }
 

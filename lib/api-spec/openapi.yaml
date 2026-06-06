@@ -143,6 +143,14 @@ components:
         errorMessage:
           type: string
           nullable: true
+        timeRemainingMinutes:
+          type: integer
+          nullable: true
+          description: Minutes of free server time remaining (null if unknown)
+        lastRenewAt:
+          type: string
+          nullable: true
+          description: ISO timestamp of last successful server time extension
       required:
         - running
         - state
@@ -152,6 +160,8 @@ components:
         - lastReloadAt
         - reloadCount
         - errorMessage
+        - timeRemainingMinutes
+        - lastRenewAt
     BotScreenshot:
       type: object
       properties:

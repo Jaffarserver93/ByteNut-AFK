@@ -16,4 +16,8 @@ export interface BotStatus {
   lastReloadAt: string | null;
   reloadCount: number;
   errorMessage: string | null;
+  /** Minutes of free server time remaining (null if unknown) */
+  timeRemainingMinutes: number | null;
+  /** ISO timestamp of last successful server time extension */
+  lastRenewAt: string | null;
 }

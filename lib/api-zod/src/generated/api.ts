@@ -29,7 +29,9 @@ export const GetBotStatusResponse = zod.object({
   "currentUrl": zod.string().nullable(),
   "lastReloadAt": zod.string().nullable(),
   "reloadCount": zod.number(),
-  "errorMessage": zod.string().nullable()
+  "errorMessage": zod.string().nullable(),
+  "timeRemainingMinutes": zod.number().nullable().describe('Minutes of free server time remaining (null if unknown)'),
+  "lastRenewAt": zod.string().nullable().describe('ISO timestamp of last successful server time extension')
 })
 
 
@@ -45,7 +47,9 @@ export const StartBotResponse = zod.object({
   "currentUrl": zod.string().nullable(),
   "lastReloadAt": zod.string().nullable(),
   "reloadCount": zod.number(),
-  "errorMessage": zod.string().nullable()
+  "errorMessage": zod.string().nullable(),
+  "timeRemainingMinutes": zod.number().nullable().describe('Minutes of free server time remaining (null if unknown)'),
+  "lastRenewAt": zod.string().nullable().describe('ISO timestamp of last successful server time extension')
 })
 
 
@@ -61,7 +65,9 @@ export const StopBotResponse = zod.object({
   "currentUrl": zod.string().nullable(),
   "lastReloadAt": zod.string().nullable(),
   "reloadCount": zod.number(),
-  "errorMessage": zod.string().nullable()
+  "errorMessage": zod.string().nullable(),
+  "timeRemainingMinutes": zod.number().nullable().describe('Minutes of free server time remaining (null if unknown)'),
+  "lastRenewAt": zod.string().nullable().describe('ISO timestamp of last successful server time extension')
 })
 
 

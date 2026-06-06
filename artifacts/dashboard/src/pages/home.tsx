@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Play, Square, Terminal, Image as ImageIcon, Activity, Clock, RefreshCw, Trash2, CheckCircle2, AlertTriangle, AlertCircle, Info, Wifi, WifiOff } from "lucide-react";
+import { Play, Square, Terminal, Image as ImageIcon, Activity, Clock, RefreshCw, Trash2, CheckCircle2, AlertTriangle, AlertCircle, Info, Wifi, WifiOff, Timer } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import socket from "@/lib/socket";
 
@@ -246,6 +246,77 @@ export default function Dashboard() {
                   </span>
                 )}
               </div>
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Server Time Row */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Free Time Remaining */}
+          <Card className={`bg-card/40 backdrop-blur-md border-white/5 shadow-xl relative overflow-hidden ${
+            status?.running && status?.timeRemainingMinutes != null && status.timeRemainingMinutes < 20
+              ? 'border-red-500/30'
+              : status?.running && status?.timeRemainingMinutes != null && status.timeRemainingMinutes < 60
+              ? 'border-yellow-500/30'
+              : ''
+          }`}>
+            {status?.running && status?.timeRemainingMinutes != null && status.timeRemainingMinutes < 20 && (
+              <div className="absolute inset-0 bg-red-500/5 pointer-events-none animate-pulse" />
+            )}
+            <CardContent className="p-6 flex flex-col justify-center h-full">
+              <span className="text-sm font-medium text-muted-foreground flex items-center gap-2 mb-2">
+                <Timer className="h-4 w-4" /> Free Time Left
+              </span>
+              <div className="flex items-end gap-3">
+                {status?.timeRemainingMinutes != null ? (
+                  <>
+                    <span className={`text-3xl font-bold font-mono drop-shadow-[0_0_8px_rgba(255,255,255,0.2)] ${
+                      status.timeRemainingMinutes < 20
+                        ? 'text-red-400'
+                        : status.timeRemainingMinutes < 60
+                        ? 'text-yellow-400'
+                        : 'text-green-400'
+                    }`}>
+                      {Math.floor(status.timeRemainingMinutes / 60) > 0
+                        ? `${Math.floor(status.timeRemainingMinutes / 60)}h ${status.timeRemainingMinutes % 60}m`
+                        : `${status.timeRemainingMinutes}m`}
+                    </span>
+                    {status.timeRemainingMinutes < 20 && (
+                      <Badge variant="outline" className="mb-1 text-xs border-red-500/50 text-red-400 bg-red-500/10 animate-pulse">
+                        AUTO-RENEW
+                      </Badge>
+                    )}
+                    {status.timeRemainingMinutes >= 20 && status.timeRemainingMinutes < 60 && (
+                      <Badge variant="outline" className="mb-1 text-xs border-yellow-500/50 text-yellow-400 bg-yellow-500/10">
+                        LOW
+                      </Badge>
+                    )}
+                  </>
+                ) : (
+                  <span className="text-3xl font-bold text-muted-foreground">—</span>
+                )}
+              </div>
+              {status?.lastRenewAt && (
+                <span className="text-xs text-green-400 mt-2 flex items-center gap-1">
+                  <CheckCircle2 className="h-3 w-3" /> Last extended: {new Date(status.lastRenewAt).toLocaleTimeString()}
+                </span>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Current URL / Page Monitor */}
+          <Card className="bg-card/40 backdrop-blur-md border-white/5 shadow-xl">
+            <CardContent className="p-6 flex flex-col justify-center h-full">
+              <span className="text-sm font-medium text-muted-foreground flex items-center gap-2 mb-2">
+                <Activity className="h-4 w-4" /> Current Page
+              </span>
+              {status?.currentUrl ? (
+                <span className="text-sm font-mono text-white/80 break-all leading-relaxed">
+                  {status.currentUrl}
+                </span>
+              ) : (
+                <span className="text-sm text-muted-foreground">Not running</span>
+              )}
             </CardContent>
           </Card>
         </div>
