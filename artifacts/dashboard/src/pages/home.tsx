@@ -27,12 +27,26 @@ export default function Dashboard() {
   const stopBot = useStopBot();
   const clearLogs = useClearBotLogs();
 
-  // Live screenshot via socket
+  // Live screenshot via socket + HTTP fallback
   const [liveScreenshot, setLiveScreenshot] = useState<{ data: string; capturedAt: string } | null>(null);
   const [socketConnected, setSocketConnected] = useState(false);
 
+  // On mount: fetch current screenshot via HTTP so it shows immediately
   useEffect(() => {
-    socket.on("connect", () => setSocketConnected(true));
+    fetch("/api/bot/screenshot")
+      .then((r) => r.json())
+      .then((d: { data?: string | null; capturedAt?: string | null }) => {
+        if (d?.data && d?.capturedAt) {
+          setLiveScreenshot({ data: d.data, capturedAt: d.capturedAt });
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    socket.on("connect", () => {
+      setSocketConnected(true);
+    });
     socket.on("disconnect", () => setSocketConnected(false));
     socket.on("screenshot", (payload: { data: string; capturedAt: string }) => {
       setLiveScreenshot(payload);

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { logger } from "../lib/logger.js";
-import { emitScreenshot, emitStatus, emitLog } from "../lib/socket.js";
+import { emitScreenshot, emitStatus, emitLog, clearScreenshotCache } from "../lib/socket.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -183,6 +183,7 @@ let lastReloadAt: Date | null = null;
 let reloadCount = 0;
 let errorMessage: string | null = null;
 let reloadTimer: ReturnType<typeof setInterval> | null = null;
+let screenshotTimer: ReturnType<typeof setInterval> | null = null;
 let lastScreenshot: BotScreenshot = { data: null, capturedAt: null };
 const auditLog: BotLogEntry[] = [];
 const MAX_LOG_ENTRIES = 500;
@@ -225,39 +226,58 @@ async function isCloudflareChallenge(page: any): Promise<boolean> {
   return false;
 }
 
-async function clickCloudflareCheckbox(page: any): Promise<boolean> {
-  const frames: any[] = page.frames();
-
-  for (const frame of frames) {
-    const frameUrl: string = frame.url();
-    if (
-      frameUrl.includes("challenges.cloudflare.com") ||
-      frameUrl.includes("cloudflare.com/cdn-cgi/challenge-platform")
-    ) {
-      for (const sel of CF_CHECKBOX_SELECTORS) {
-        try {
-          const el = await frame.$(sel);
-          if (el) {
-            const box = await el.boundingBox();
-            if (box) {
-              await el.click();
-              return true;
-            }
-          }
-        } catch {}
-      }
-
+async function waitForCfIframeLoaded(page: any, timeoutMs = 8000): Promise<any | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const frames: any[] = page.frames();
+    for (const frame of frames) {
       try {
-        const body = await frame.$("body");
-        if (body) {
-          const box = await body.boundingBox();
-          if (box) {
-            await frame.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        const url: string = frame.url();
+        if (
+          url.includes("challenges.cloudflare.com") ||
+          url.includes("cloudflare.com/cdn-cgi/challenge-platform")
+        ) {
+          const readyState: string = await frame.evaluate(() => document.readyState).catch(() => "");
+          if (readyState === "complete" || readyState === "interactive") {
+            return frame;
+          }
+        }
+      } catch {}
+    }
+    await sleep(400);
+  }
+  return null;
+}
+
+async function clickCloudflareCheckbox(page: any): Promise<boolean> {
+  const cfFrame = await waitForCfIframeLoaded(page, 8000);
+
+  if (cfFrame) {
+    for (const sel of CF_CHECKBOX_SELECTORS) {
+      try {
+        const el = await cfFrame.$(sel);
+        if (el) {
+          const box = await el.boundingBox();
+          if (box && box.width > 0 && box.height > 0) {
+            await cfFrame.evaluate((el: any) => el.scrollIntoView(), el);
+            await sleep(300);
+            await el.click();
             return true;
           }
         }
       } catch {}
     }
+
+    try {
+      const body = await cfFrame.$("body");
+      if (body) {
+        const box = await body.boundingBox();
+        if (box) {
+          await cfFrame.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+          return true;
+        }
+      }
+    } catch {}
   }
 
   for (const sel of CF_TURNSTILE_IFRAME_SELECTORS) {
@@ -265,7 +285,7 @@ async function clickCloudflareCheckbox(page: any): Promise<boolean> {
       const iframeEl = await page.$(sel);
       if (iframeEl) {
         const box = await iframeEl.boundingBox();
-        if (box) {
+        if (box && box.width > 0) {
           await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
           return true;
         }
@@ -549,6 +569,7 @@ export async function startBot(): Promise<BotStatus> {
       addLog("success", `Now active on target page: ${targetUrl}`);
 
       reloadTimer = setInterval(doReload, RELOAD_INTERVAL_MS);
+      screenshotTimer = setInterval(captureScreenshot, 10_000);
     } catch (err: any) {
       state = "error";
       errorMessage = err?.message ?? String(err);
@@ -563,6 +584,8 @@ export async function startBot(): Promise<BotStatus> {
 
 async function cleanupBrowser(): Promise<void> {
   if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
+  if (screenshotTimer) { clearInterval(screenshotTimer); screenshotTimer = null; }
+  clearScreenshotCache();
   try {
     if (browserInstance) await browserInstance.close();
   } catch {} finally {
