@@ -40,7 +40,7 @@ app.use("/api", router);
 if (fs.existsSync(dashboardDist)) {
   logger.info({ dashboardDist }, "Serving dashboard static files");
   app.use(express.static(dashboardDist));
-  app.get("*", (_req, res) => {
+  app.get("/{*splat}", (_req, res) => {
     res.sendFile(path.join(dashboardDist, "index.html"));
   });
 }
