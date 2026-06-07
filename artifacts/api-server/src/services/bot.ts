@@ -959,20 +959,72 @@ async function doRenewFlow(page: any): Promise<void> {
 
   addLog("warn", `⚠️ Only ${modalMinutes}m remaining — solving Turnstile & extending...`);
 
-  // ── Step 4: Wait for Turnstile to auto-solve ──────────────────────────────
-  try {
-    await page.waitForSelector('input[name="cf-turnstile-response"]', { timeout: 10_000 });
-  } catch {
-    addLog("warn", "Turnstile input not found in renew modal — skipping extend");
-    isRenewing = false;
-    return;
-  }
+  // ── Step 4: Solve Turnstile with active retry loop ────────────────────────
+  // Give the renewal page a moment to fully render the Turnstile widget
+  await sleep(3000);
+  await captureScreenshot();
 
-  const solved = await waitForTurnstileAutoSolved(page, 25_000);
-  if (!solved) {
-    addLog("warn", "Turnstile not auto-solved — will retry on next cycle");
-    isRenewing = false;
-    return;
+  // First check whether a Turnstile even exists on this page
+  const hasTurnstileInput = await page.$('input[name="cf-turnstile-response"]').catch(() => null);
+  if (!hasTurnstileInput) {
+    // No Turnstile present — jump straight to clicking Extend
+    addLog("info", "No Turnstile detected on renew page — proceeding to Extend button directly");
+  } else {
+    let solved = false;
+    const MAX_TURNSTILE_ATTEMPTS = 4;
+
+    for (let attempt = 1; attempt <= MAX_TURNSTILE_ATTEMPTS && !solved; attempt++) {
+      addLog("info", `Turnstile solve attempt ${attempt}/${MAX_TURNSTILE_ATTEMPTS}...`);
+      await captureScreenshot();
+
+      // Phase A: Check if already solved (token present from a previous round)
+      const existingVal: string = await page.evaluate(() => {
+        const el = document.querySelector('input[name="cf-turnstile-response"]') as HTMLInputElement | null;
+        return el?.value ?? "";
+      }).catch(() => "");
+      if (existingVal && existingVal.length > 10) {
+        addLog("success", "Turnstile already has a valid token — proceeding");
+        solved = true;
+        break;
+      }
+
+      // Phase B: Wait up to 12s for puppeteer-real-browser to auto-solve
+      solved = await waitForTurnstileAutoSolved(page, 12_000);
+      if (solved) break;
+
+      // Phase C: Auto-solve failed — actively click the widget to reset/trigger it
+      addLog("info", `Auto-solve timed out on attempt ${attempt} — clicking Turnstile widget to reset it...`);
+      await handleEmbeddedTurnstile(page);
+      await sleep(1500);
+
+      // Phase D: Wait again after the manual click
+      solved = await waitForTurnstileAutoSolved(page, 10_000);
+      if (solved) break;
+
+      // Phase E: Try resetting the widget via JS (forces a fresh challenge)
+      try {
+        await page.evaluate(() => {
+          if (typeof (window as any).turnstile?.reset === "function") {
+            (window as any).turnstile.reset();
+          } else {
+            // Try resetting each widget by iterating sitekeys
+            const containers = document.querySelectorAll("[data-sitekey], .cf-turnstile");
+            containers.forEach((c: any) => {
+              try { (window as any).turnstile?.reset(c); } catch {}
+            });
+          }
+        });
+        addLog("info", "Triggered turnstile.reset() — waiting for fresh challenge...");
+      } catch {}
+      await sleep(3000);
+      await captureScreenshot();
+    }
+
+    if (!solved) {
+      addLog("warn", `Turnstile could not be solved after ${MAX_TURNSTILE_ATTEMPTS} attempts — will retry on next cycle`);
+      isRenewing = false;
+      return;
+    }
   }
 
   addLog("success", "Turnstile solved — clicking Extend button...");
