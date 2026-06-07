@@ -945,15 +945,16 @@ async function doRenewFlow(page: any): Promise<void> {
 
   // ── Step 3: Only extend if time is under 60 min ───────────────────────────
   if (modalMinutes === null || modalMinutes >= 60) {
-    if (modalMinutes !== null && modalMinutes < 120) {
-      addLog("info", `Server time: ${modalMinutes}m remaining — auto-renew triggers at < 60min`);
+    if (modalMinutes !== null) {
+      const h = Math.floor(modalMinutes / 60);
+      const m = modalMinutes % 60;
+      addLog("info", `Server time: ${h}h ${m}m remaining — auto-renew triggers at < 60min`);
     }
-    // Navigate back to target page so the sidebar is usable next cycle
-    const targetUrl = process.env["TARGET_URL"] ?? "";
-    try {
-      await navigateTo(page, targetUrl, "target page (back from renew modal)");
-    } catch {}
+    // Release the lock BEFORE the back-navigation so a slow/CF-challenged
+    // navigation cannot block the next reload cycle.
     isRenewing = false;
+    const targetUrl = process.env["TARGET_URL"] ?? "";
+    navigateTo(page, targetUrl, "target page (back from renew modal)").catch(() => {});
     return;
   }
 
@@ -1114,8 +1115,21 @@ async function doReload(): Promise<void> {
     emitStatus(getStatus());
     addLog("success", `Cycle #${reloadCount} complete — ${targetUrl}`);
 
-    // Step 4: Always click RENEW SERVER sidebar to check time & extend if < 20 min
-    await doRenewFlow(pageInstance);
+    // Step 4: Only visit the renew modal when time is actually low (≤ 70 min) or unknown.
+    // If the target page already told us there's plenty of time, skip the round-trip entirely.
+    const effectiveMinutes = minutes !== null
+      ? minutes
+      : (timeRemainingMinutes !== null && timeReadAt !== null
+          ? Math.max(0, timeRemainingMinutes - Math.floor((Date.now() - timeReadAt.getTime()) / 60_000))
+          : null);
+
+    if (effectiveMinutes === null || effectiveMinutes <= 70) {
+      await doRenewFlow(pageInstance);
+    } else {
+      const h = Math.floor(effectiveMinutes / 60);
+      const m = effectiveMinutes % 60;
+      addLog("info", `Server time: ${h}h ${m}m remaining — renew check skipped (triggers ≤ 70min)`);
+    }
 
     await captureScreenshot();
     emitStatus(getStatus());
