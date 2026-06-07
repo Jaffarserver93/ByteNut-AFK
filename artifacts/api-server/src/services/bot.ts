@@ -1068,25 +1068,34 @@ async function doRenewFlow(page: any): Promise<void> {
 
 function isFatalBrowserError(err: unknown): boolean {
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  // Only match errors that definitively mean the browser/page session is gone.
+  // Do NOT match "protocol error" alone — it appears in many non-fatal errors
+  // and causes false-positive restarts that break the Xvfb/Chrome startup race.
   return (
     msg.includes("session closed") ||
     msg.includes("target closed") ||
     msg.includes("targetcloseerror") ||
-    msg.includes("protocol error") ||
     msg.includes("browser has disconnected") ||
-    msg.includes("connection refused") ||
     msg.includes("websocket is not open")
   );
 }
 
+let isHandlingFatalError = false;
+
 async function handleFatalBrowserError(err: unknown): Promise<void> {
+  // Prevent re-entrant restarts (e.g. multiple errors firing at once)
+  if (isHandlingFatalError) return;
+  isHandlingFatalError = true;
   const msg = err instanceof Error ? err.message : String(err);
   addLog("error", `Fatal browser error detected — restarting browser in 15s: ${msg.slice(0, 120)}`);
   state = "error";
   errorMessage = "Browser session lost — restarting...";
   emitStatus(getStatus());
   await cleanupBrowser();
-  setTimeout(() => startBot(), 15_000);
+  setTimeout(() => {
+    isHandlingFatalError = false;
+    startBot();
+  }, 15_000);
 }
 
 // ─── Main Reload Cycle ────────────────────────────────────────────────────────
