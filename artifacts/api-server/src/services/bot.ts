@@ -1123,12 +1123,12 @@ async function doReload(): Promise<void> {
           ? Math.max(0, timeRemainingMinutes - Math.floor((Date.now() - timeReadAt.getTime()) / 60_000))
           : null);
 
-    if (effectiveMinutes === null || effectiveMinutes <= 70) {
+    if (effectiveMinutes === null || effectiveMinutes <= 30) {
       await doRenewFlow(pageInstance);
     } else {
       const h = Math.floor(effectiveMinutes / 60);
       const m = effectiveMinutes % 60;
-      addLog("info", `Server time: ${h}h ${m}m remaining — renew check skipped (triggers ≤ 70min)`);
+      addLog("info", `Server time: ${h}h ${m}m remaining — renew check skipped (triggers ≤ 30min)`);
     }
 
     await captureScreenshot();
