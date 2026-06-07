@@ -51,6 +51,7 @@ export interface DiagnosticInfo {
 
 const RELOAD_INTERVAL_MS = 60_000;
 const LOGIN_TIMEOUT_MS = 30_000;
+const RELOAD_TIMEOUT_MS = 60_000;
 
 const CHROME_LAUNCH_ARGS = [
   "--no-sandbox",
@@ -191,6 +192,7 @@ let timeRemainingMinutes: number | null = null;
 let reloadTimer: ReturnType<typeof setInterval> | null = null;
 let screenshotTimer: ReturnType<typeof setInterval> | null = null;
 let lastScreenshot: BotScreenshot = { data: null, capturedAt: null };
+let isRenewing = false;
 const auditLog: BotLogEntry[] = [];
 const MAX_LOG_ENTRIES = 500;
 
@@ -845,6 +847,7 @@ async function readClockTimeFromPage(page: any): Promise<string | null> {
 }
 
 async function doRenewFlow(page: any): Promise<void> {
+  isRenewing = true;
   // ── Step 1: Click RENEW SERVER sidebar button ─────────────────────────────
   addLog("info", "Clicking left sidebar RENEW SERVER...");
   await captureScreenshot();
@@ -852,6 +855,7 @@ async function doRenewFlow(page: any): Promise<void> {
   const renewClicked = await clickRenewSidebarButton(page);
   if (!renewClicked) {
     addLog("warn", "Could not find RENEW SERVER sidebar button — skipping this cycle");
+    isRenewing = false;
     return;
   }
 
@@ -871,7 +875,6 @@ async function doRenewFlow(page: any): Promise<void> {
       modalMinutes = parseTimeToMinutes(clockText);
     }
     addLog("info", `Time remaining (modal): ${clockText}`);
-    // Keep global timeRemainingMinutes in sync
     if (modalMinutes !== null) {
       timeRemainingMinutes = modalMinutes;
       emitStatus(getStatus());
@@ -880,16 +883,17 @@ async function doRenewFlow(page: any): Promise<void> {
     addLog("info", "Could not read time remaining from modal");
   }
 
-  // ── Step 3: Only extend if time is critically low (< 20 min) ─────────────
-  if (modalMinutes === null || modalMinutes >= 20) {
+  // ── Step 3: Only extend if time is critically low (< 30 min) ─────────────
+  if (modalMinutes === null || modalMinutes >= 30) {
     if (modalMinutes !== null && modalMinutes < 60) {
-      addLog("warn", `Server time under 1 hour (${modalMinutes}m) — auto-renew will trigger at < 20min`);
+      addLog("warn", `Server time under 1 hour (${modalMinutes}m) — auto-renew will trigger at < 30min`);
     }
     // Navigate back to target page so the sidebar is usable next cycle
     const targetUrl = process.env["TARGET_URL"] ?? "";
     try {
       await navigateTo(page, targetUrl, "target page (back from renew modal)");
     } catch {}
+    isRenewing = false;
     return;
   }
 
@@ -900,12 +904,14 @@ async function doRenewFlow(page: any): Promise<void> {
     await page.waitForSelector('input[name="cf-turnstile-response"]', { timeout: 10_000 });
   } catch {
     addLog("warn", "Turnstile input not found in renew modal — skipping extend");
+    isRenewing = false;
     return;
   }
 
   const solved = await waitForTurnstileAutoSolved(page, 25_000);
   if (!solved) {
     addLog("warn", "Turnstile not auto-solved — will retry on next cycle");
+    isRenewing = false;
     return;
   }
 
@@ -934,18 +940,24 @@ async function doRenewFlow(page: any): Promise<void> {
         lastRenewAt = new Date();
         addLog("success", "✅ Server time extended successfully! (+180 min)");
         emitStatus(getStatus());
+        isRenewing = false;
         return;
       }
     } catch {}
   }
 
   addLog("warn", "Extend button not found after Turnstile solved — skipping");
+  isRenewing = false;
 }
 
 // ─── Main Reload Cycle ────────────────────────────────────────────────────────
 
 async function doReload(): Promise<void> {
   if (!pageInstance) return;
+  if (isRenewing) {
+    addLog("info", "Skipping reload cycle — renewal in progress");
+    return;
+  }
   try {
     const targetUrl = process.env["TARGET_URL"] ?? "";
 
@@ -954,7 +966,9 @@ async function doReload(): Promise<void> {
 
     // Step 2: Reload to refresh content
     addLog("info", `Refreshing target page (cycle #${reloadCount + 1})`);
-    await pageInstance.reload({ waitUntil: "domcontentloaded", timeout: LOGIN_TIMEOUT_MS });
+    await pageInstance.reload({ waitUntil: "domcontentloaded", timeout: RELOAD_TIMEOUT_MS }).catch((err: any) => {
+      addLog("info", `Page reload timed out (${err?.message?.slice(0, 60) ?? "timeout"}) — continuing anyway`);
+    });
 
     const cfHandled = await handleCloudflareChallenge(pageInstance);
     if (!cfHandled) {
@@ -1055,6 +1069,7 @@ export async function startBot(): Promise<BotStatus> {
   timeRemainingMinutes = null;
   errorMessage = null;
   lastScreenshot = { data: null, capturedAt: null };
+  isRenewing = false;
   addLog("info", "Launching browser...");
   emitStatus(getStatus());
 
