@@ -192,8 +192,9 @@ let reloadCount = 0;
 let errorMessage: string | null = null;
 let timeRemainingMinutes: number | null = null;
 let timeReadAt: Date | null = null;
-let reloadTimer: ReturnType<typeof setInterval> | null = null;
+let reloadTimer: ReturnType<typeof setTimeout> | null = null;
 let screenshotTimer: ReturnType<typeof setInterval> | null = null;
+let isReloading = false;
 let lastScreenshot: BotScreenshot = { data: null, capturedAt: null };
 let isRenewing = false;
 const auditLog: BotLogEntry[] = [];
@@ -1066,22 +1067,50 @@ async function doRenewFlow(page: any): Promise<void> {
 // ─── Main Reload Cycle ────────────────────────────────────────────────────────
 
 async function doReload(): Promise<void> {
+  // Guard: never run two reload cycles at the same time.
+  // setInterval-based scheduling can stack calls if a cycle takes longer than
+  // the interval (e.g. 60 s reload timeout + CF challenge handling). We now
+  // use a recursive-setTimeout chain (see scheduleNextReload) so this guard is
+  // a safety-net rather than the primary mechanism.
+  if (isReloading) {
+    addLog("info", "Previous reload cycle still running — skipping this tick");
+    return;
+  }
   if (!pageInstance) return;
   if (isRenewing) {
     addLog("info", "Skipping reload cycle — renewal in progress");
     return;
   }
+
+  isReloading = true;
   try {
     const targetUrl = process.env["TARGET_URL"] ?? "";
 
     // Step 1: Ensure we're still on the target page (handles drift + session expiry)
     await ensureOnTargetPage(pageInstance);
 
-    // Step 2: Reload to refresh content
+    // Step 2: Reload to refresh content.
+    // Strategy: try a fast domcontentloaded reload first (30 s limit).
+    // If that times out the page is stuck — abort by navigating hard to the
+    // target URL (clears any in-flight Puppeteer navigation) then wait for
+    // domcontentloaded with a fresh 30 s budget.
     addLog("info", `Refreshing target page (cycle #${reloadCount + 1})`);
-    await pageInstance.reload({ waitUntil: "domcontentloaded", timeout: RELOAD_TIMEOUT_MS }).catch((err: any) => {
-      addLog("info", `Page reload timed out (${err?.message?.slice(0, 60) ?? "timeout"}) — continuing anyway`);
-    });
+    const FAST_TIMEOUT_MS = 30_000;
+    let reloadTimedOut = false;
+    try {
+      await pageInstance.reload({ waitUntil: "domcontentloaded", timeout: FAST_TIMEOUT_MS });
+    } catch (err: any) {
+      reloadTimedOut = true;
+      addLog("warn", `Reload timed out after ${FAST_TIMEOUT_MS / 1000}s — navigating hard to target URL to recover`);
+      // Hard-navigate to clear the stuck navigation state, then wait for load
+      try {
+        await pageInstance.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: FAST_TIMEOUT_MS });
+        reloadTimedOut = false; // recovered
+        addLog("info", "Hard navigation succeeded — page recovered");
+      } catch (gotoErr: any) {
+        addLog("warn", `Hard navigation also timed out (${gotoErr?.message?.slice(0, 60) ?? "timeout"}) — continuing with current page state`);
+      }
+    }
 
     const cfHandled = await handleCloudflareChallenge(pageInstance);
     if (!cfHandled) {
@@ -1115,7 +1144,7 @@ async function doReload(): Promise<void> {
     emitStatus(getStatus());
     addLog("success", `Cycle #${reloadCount} complete — ${targetUrl}`);
 
-    // Step 4: Only visit the renew modal when time is actually low (≤ 70 min) or unknown.
+    // Step 4: Only visit the renew modal when time is actually low (≤ 30 min) or unknown.
     // If the target page already told us there's plenty of time, skip the round-trip entirely.
     const effectiveMinutes = minutes !== null
       ? minutes
@@ -1135,7 +1164,20 @@ async function doReload(): Promise<void> {
     emitStatus(getStatus());
   } catch (err: any) {
     addLog("warn", `Cycle failed: ${err?.message ?? String(err)}`);
+  } finally {
+    isReloading = false;
   }
+}
+
+// Schedule the next reload only AFTER the current one finishes, so cycles
+// never stack on top of each other regardless of how long a cycle takes.
+function scheduleNextReload(): void {
+  if (reloadTimer) { clearTimeout(reloadTimer); reloadTimer = null; }
+  reloadTimer = setTimeout(async () => {
+    if (state !== "active") return; // bot was stopped
+    await doReload();
+    scheduleNextReload(); // chain the next one
+  }, RELOAD_INTERVAL_MS);
 }
 
 async function connectBrowser(): Promise<{ browser: any; page: any }> {
@@ -1274,7 +1316,7 @@ export async function startBot(): Promise<BotStatus> {
 
       // Upgrade screenshot interval to 10s now that bot is active
       if (screenshotTimer) { clearInterval(screenshotTimer); screenshotTimer = null; }
-      reloadTimer = setInterval(doReload, RELOAD_INTERVAL_MS);
+      scheduleNextReload(); // uses recursive setTimeout — never stacks concurrent cycles
       screenshotTimer = setInterval(captureScreenshot, 10_000);
     } catch (err: any) {
       state = "error";
@@ -1289,8 +1331,10 @@ export async function startBot(): Promise<BotStatus> {
 }
 
 async function cleanupBrowser(): Promise<void> {
-  if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
+  if (reloadTimer) { clearTimeout(reloadTimer); reloadTimer = null; }
   if (screenshotTimer) { clearInterval(screenshotTimer); screenshotTimer = null; }
+  isReloading = false;
+  isRenewing = false;
   clearScreenshotCache();
   try {
     if (browserInstance) await browserInstance.close();
