@@ -845,36 +845,52 @@ async function ensureOnTargetPage(page: any): Promise<void> {
 // ─── Auto-Renew Flow ──────────────────────────────────────────────────────────
 
 async function clickRenewSidebarButton(page: any): Promise<boolean> {
-  // CSS selector (fastest)
-  for (const sel of [".renew-server-menu-item", "li.renew-server-menu-item", 'li[class*="renew"]']) {
+  // Wait up to 5s for sidebar to be present after page navigation
+  const cssSelectors = [
+    ".renew-server-menu-item",
+    "li.renew-server-menu-item",
+    'li[class*="renew"]',
+    'a[href*="renew"]',
+    '[data-action*="renew" i]',
+  ];
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // CSS selectors (fastest)
+    for (const sel of cssSelectors) {
+      try {
+        const el = await page.$(sel);
+        if (el) {
+          const box = await el.boundingBox();
+          if (box && box.width > 0 && box.height > 0) {
+            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
+            await sleep(150);
+            await el.click();
+            return true;
+          }
+        }
+      } catch {}
+    }
+
+    // Text-based fallback — broader tag set, case-insensitive
     try {
-      const el = await page.$(sel);
-      if (el) {
-        const box = await el.boundingBox();
-        if (box && box.width > 0 && box.height > 0) {
-          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
-          await sleep(150);
-          await el.click();
-          return true;
+      const clicked: boolean = await page.evaluate(() => {
+        const items = Array.from(document.querySelectorAll("li, button, a, span, div[role='button']"));
+        for (const el of items) {
+          const txt = ((el as HTMLElement).innerText ?? (el as HTMLElement).textContent ?? "").trim().toUpperCase();
+          if (txt.includes("RENEW SERVER") || txt === "RENEW") {
+            (el as HTMLElement).click();
+            return true;
+          }
         }
-      }
+        return false;
+      });
+      if (clicked) return true;
     } catch {}
+
+    if (attempt < 2) {
+      await sleep(1500); // Wait for sidebar to render before retrying
+    }
   }
-  // Text-based fallback
-  try {
-    const clicked: boolean = await page.evaluate(() => {
-      const items = Array.from(document.querySelectorAll("li, button, a"));
-      for (const el of items) {
-        const txt = (el as HTMLElement).innerText ?? "";
-        if (txt.trim().toUpperCase().includes("RENEW SERVER")) {
-          (el as HTMLElement).click();
-          return true;
-        }
-      }
-      return false;
-    });
-    if (clicked) return true;
-  } catch {}
   return false;
 }
 
@@ -927,10 +943,10 @@ async function doRenewFlow(page: any): Promise<void> {
     addLog("info", "Could not read time remaining from modal");
   }
 
-  // ── Step 3: Only extend if time is critically low (< 30 min) ─────────────
-  if (modalMinutes === null || modalMinutes >= 30) {
-    if (modalMinutes !== null && modalMinutes < 60) {
-      addLog("warn", `Server time under 1 hour (${modalMinutes}m) — auto-renew will trigger at < 30min`);
+  // ── Step 3: Only extend if time is under 60 min ───────────────────────────
+  if (modalMinutes === null || modalMinutes >= 60) {
+    if (modalMinutes !== null && modalMinutes < 120) {
+      addLog("info", `Server time: ${modalMinutes}m remaining — auto-renew triggers at < 60min`);
     }
     // Navigate back to target page so the sidebar is usable next cycle
     const targetUrl = process.env["TARGET_URL"] ?? "";
@@ -1140,21 +1156,23 @@ export async function startBot(): Promise<BotStatus> {
 
       pageInstance.on("close", async () => {
         if (state === "active" || state === "navigating" || state === "logging_in") {
-          addLog("warn", "Browser page closed unexpectedly — stopping bot");
+          addLog("warn", "Browser page closed unexpectedly — restarting in 15s...");
           state = "error";
-          errorMessage = "Browser page closed unexpectedly";
+          errorMessage = "Browser page closed unexpectedly — restarting...";
           emitStatus(getStatus());
           await cleanupBrowser();
+          setTimeout(() => startBot(), 15_000);
         }
       });
 
       browserInstance.on("disconnected", async () => {
         if (state === "active" || state === "navigating" || state === "logging_in") {
-          addLog("warn", "Browser disconnected — stopping bot");
+          addLog("warn", "Browser disconnected — restarting in 15s...");
           state = "error";
-          errorMessage = "Browser disconnected";
+          errorMessage = "Browser disconnected — restarting...";
           emitStatus(getStatus());
           await cleanupBrowser();
+          setTimeout(() => startBot(), 15_000);
         }
       });
 
