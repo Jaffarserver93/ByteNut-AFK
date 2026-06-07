@@ -191,12 +191,18 @@ let lastRenewAt: Date | null = null;
 let reloadCount = 0;
 let errorMessage: string | null = null;
 let timeRemainingMinutes: number | null = null;
+let timeReadAt: Date | null = null;
 let reloadTimer: ReturnType<typeof setInterval> | null = null;
 let screenshotTimer: ReturnType<typeof setInterval> | null = null;
 let lastScreenshot: BotScreenshot = { data: null, capturedAt: null };
 let isRenewing = false;
 const auditLog: BotLogEntry[] = [];
 const MAX_LOG_ENTRIES = 500;
+
+function setTimeRemaining(minutes: number): void {
+  timeRemainingMinutes = minutes;
+  timeReadAt = new Date();
+}
 
 const XVFB_DISPLAY = ":99";
 
@@ -914,7 +920,7 @@ async function doRenewFlow(page: any): Promise<void> {
     }
     addLog("info", `Time remaining (modal): ${clockText}`);
     if (modalMinutes !== null) {
-      timeRemainingMinutes = modalMinutes;
+      setTimeRemaining(modalMinutes);
       emitStatus(getStatus());
     }
   } else {
@@ -1020,10 +1026,17 @@ async function doReload(): Promise<void> {
     // Step 3: Read time remaining from the page
     const minutes = await extractTimeRemainingMinutes(pageInstance);
     if (minutes !== null) {
-      timeRemainingMinutes = minutes;
+      setTimeRemaining(minutes);
       const h = Math.floor(minutes / 60);
       const m = minutes % 60;
       addLog("info", `Server time remaining: ${h > 0 ? `${h}h ` : ""}${m}m`);
+    } else if (timeRemainingMinutes !== null && timeReadAt !== null) {
+      // Estimate from last known value by subtracting elapsed minutes
+      const elapsedMins = Math.floor((Date.now() - timeReadAt.getTime()) / 60_000);
+      const estimated = Math.max(0, timeRemainingMinutes - elapsedMins);
+      const h = Math.floor(estimated / 60);
+      const m = estimated % 60;
+      addLog("info", `Server time remaining (estimated): ${h > 0 ? `${h}h ` : ""}${m}m`);
     } else {
       addLog("info", "Could not read server time remaining from page");
     }
@@ -1107,6 +1120,7 @@ export async function startBot(): Promise<BotStatus> {
   lastReloadAt = null;
   lastRenewAt = null;
   timeRemainingMinutes = null;
+  timeReadAt = null;
   errorMessage = null;
   lastScreenshot = { data: null, capturedAt: null };
   isRenewing = false;
@@ -1163,7 +1177,7 @@ export async function startBot(): Promise<BotStatus> {
       await sleep(1500);
       const initMinutes = await extractTimeRemainingMinutes(pageInstance);
       if (initMinutes !== null) {
-        timeRemainingMinutes = initMinutes;
+        setTimeRemaining(initMinutes);
         const h = Math.floor(initMinutes / 60);
         const m = initMinutes % 60;
         addLog("info", `Server time remaining: ${h > 0 ? `${h}h ` : ""}${m}m`);
@@ -1232,7 +1246,11 @@ export function getStatus(): BotStatus {
     lastReloadAt: lastReloadAt?.toISOString() ?? null,
     reloadCount,
     errorMessage,
-    timeRemainingMinutes,
+    timeRemainingMinutes: (() => {
+      if (timeRemainingMinutes === null || timeReadAt === null) return timeRemainingMinutes;
+      const elapsedMins = Math.floor((Date.now() - timeReadAt.getTime()) / 60_000);
+      return Math.max(0, timeRemainingMinutes - elapsedMins);
+    })(),
     lastRenewAt: lastRenewAt?.toISOString() ?? null,
   };
 }
