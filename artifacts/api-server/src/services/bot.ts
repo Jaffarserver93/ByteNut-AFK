@@ -1064,6 +1064,31 @@ async function doRenewFlow(page: any): Promise<void> {
   isRenewing = false;
 }
 
+// ─── Fatal Error Detection ────────────────────────────────────────────────────
+
+function isFatalBrowserError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    msg.includes("session closed") ||
+    msg.includes("target closed") ||
+    msg.includes("targetcloseerror") ||
+    msg.includes("protocol error") ||
+    msg.includes("browser has disconnected") ||
+    msg.includes("connection refused") ||
+    msg.includes("websocket is not open")
+  );
+}
+
+async function handleFatalBrowserError(err: unknown): Promise<void> {
+  const msg = err instanceof Error ? err.message : String(err);
+  addLog("error", `Fatal browser error detected — restarting browser in 15s: ${msg.slice(0, 120)}`);
+  state = "error";
+  errorMessage = "Browser session lost — restarting...";
+  emitStatus(getStatus());
+  await cleanupBrowser();
+  setTimeout(() => startBot(), 15_000);
+}
+
 // ─── Main Reload Cycle ────────────────────────────────────────────────────────
 
 async function doReload(): Promise<void> {
@@ -1163,7 +1188,13 @@ async function doReload(): Promise<void> {
     await captureScreenshot();
     emitStatus(getStatus());
   } catch (err: any) {
-    addLog("warn", `Cycle failed: ${err?.message ?? String(err)}`);
+    const msg: string = err?.message ?? String(err);
+    if (isFatalBrowserError(err)) {
+      isReloading = false;
+      await handleFatalBrowserError(err);
+      return; // do NOT schedule next reload — handleFatalBrowserError calls startBot()
+    }
+    addLog("warn", `Cycle failed: ${msg}`);
   } finally {
     isReloading = false;
   }
@@ -1175,8 +1206,19 @@ function scheduleNextReload(): void {
   if (reloadTimer) { clearTimeout(reloadTimer); reloadTimer = null; }
   reloadTimer = setTimeout(async () => {
     if (state !== "active") return; // bot was stopped
-    await doReload();
-    scheduleNextReload(); // chain the next one
+    try {
+      await doReload();
+    } catch (err: unknown) {
+      if (isFatalBrowserError(err)) {
+        await handleFatalBrowserError(err);
+        return; // do NOT chain — handleFatalBrowserError calls startBot()
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      addLog("warn", `scheduleNextReload: unexpected error: ${msg}`);
+    }
+    if (state === "active") {
+      scheduleNextReload(); // chain the next one
+    }
   }, RELOAD_INTERVAL_MS);
 }
 
