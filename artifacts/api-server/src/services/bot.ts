@@ -1231,19 +1231,44 @@ function scheduleNextReload(): void {
   }, RELOAD_INTERVAL_MS);
 }
 
+async function killStaleChromeProcesses(): Promise<void> {
+  // Kill any leftover Chrome/Chromium processes from previous failed launches.
+  // Stale processes can hold the CDP debugging port and cause ECONNREFUSED.
+  const chromeProcNames = ["chrome", "chromium", "google-chrome", "chromium-browser"];
+  for (const name of chromeProcNames) {
+    try { await execFileAsync("pkill", ["-f", `${name}.*--remote-debugging-port`], { timeout: 3000 }); } catch {}
+  }
+  await sleep(800);
+}
+
 async function connectBrowser(): Promise<{ browser: any; page: any }> {
+  // Start our own Xvfb first. We pass disableXvfb:true below so puppeteer-real-browser
+  // does NOT start a second one — two competing Xvfb sessions cause Chrome to crash
+  // (ECONNREFUSED) because Chrome ends up bound to the wrong display.
   await ensureVirtualDisplay();
+  await killStaleChromeProcesses();
 
   const chromeBinary = await findChromeBinary();
 
   const connectOptions: Record<string, any> = {
-    // puppeteer-real-browser uses Xvfb automatically on headless Linux servers
     headless: false,
-    args: CHROME_LAUNCH_ARGS,
+    args: [
+      ...CHROME_LAUNCH_ARGS,
+      // Additional stability flags for long-running headless Linux sessions
+      "--disable-backgrounding-occluded-windows",
+      "--disable-renderer-backgrounding",
+      "--disable-hang-monitor",
+      "--disable-crash-reporter",
+      "--disable-oopr-debug-crash-dump",
+      "--no-crash-upload",
+    ],
     // Auto-solve embedded Cloudflare Turnstile widgets
     turnstile: true,
     // Don't randomise fingerprint — it can break Turnstile's bot-detection
     fingerprint: false,
+    // CRITICAL: We manage Xvfb ourselves above. If puppeteer-real-browser also
+    // starts Xvfb it creates a second display session and Chrome crashes.
+    disableXvfb: true,
     connectOption: {
       defaultViewport: { width: 1280, height: 720 },
       ignoreHTTPSErrors: true,
@@ -1255,20 +1280,42 @@ async function connectBrowser(): Promise<{ browser: any; page: any }> {
     addLog("info", `Using system Chrome: ${chromeBinary}`);
     connectOptions["customConfig"] = { executablePath: chromeBinary };
   } else {
-    // Fallback: let puppeteer-real-browser find Chrome itself
     addLog("info", "No system Chrome found — letting puppeteer-real-browser locate Chrome");
   }
 
-  addLog("info", "Launching browser with puppeteer-real-browser (turnstile: true)...");
+  // Retry loop — ECONNREFUSED can happen if Chrome takes longer than expected
+  // to open its debugging port on the first attempt.
+  const MAX_LAUNCH_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_LAUNCH_ATTEMPTS; attempt++) {
+    try {
+      if (attempt > 1) {
+        addLog("info", `Browser launch attempt ${attempt}/${MAX_LAUNCH_ATTEMPTS}...`);
+        await killStaleChromeProcesses();
+        await sleep(2000);
+      } else {
+        addLog("info", "Launching browser with puppeteer-real-browser (turnstile: true)...");
+      }
 
-  const { connect } = await import("puppeteer-real-browser");
-  const { browser, page } = await connect(connectOptions);
+      const { connect } = await import("puppeteer-real-browser");
+      const { browser, page } = await connect(connectOptions);
 
-  // Ensure viewport is set (connectOption.defaultViewport may be ignored in some versions)
-  try { await page.setViewport({ width: 1280, height: 720 }); } catch {}
+      // Ensure viewport is set (connectOption.defaultViewport may be ignored in some versions)
+      try { await page.setViewport({ width: 1280, height: 720 }); } catch {}
 
-  addLog("success", "Browser launched successfully");
-  return { browser, page };
+      addLog("success", "Browser launched successfully");
+      return { browser, page };
+    } catch (err: any) {
+      const msg: string = err?.message ?? String(err);
+      if (attempt < MAX_LAUNCH_ATTEMPTS) {
+        addLog("warn", `Browser launch attempt ${attempt} failed (${msg.slice(0, 80)}) — retrying...`);
+      } else {
+        throw err; // All attempts exhausted — propagate to startBot's catch
+      }
+    }
+  }
+
+  // Unreachable but satisfies TypeScript
+  throw new Error("Browser launch failed after all attempts");
 }
 
 export async function startBot(): Promise<BotStatus> {
@@ -1393,7 +1440,10 @@ async function cleanupBrowser(): Promise<void> {
     browserInstance = null;
     pageInstance = null;
   }
-  stopXvfb();
+  // Do NOT call stopXvfb() here — keep Xvfb alive between restarts.
+  // Killing and restarting Xvfb on every cleanup introduces a race where
+  // Chrome launches before the new Xvfb session is ready, causing ECONNREFUSED.
+  // Xvfb is only stopped when the whole server shuts down (process exit).
 }
 
 export async function stopBot(): Promise<BotStatus> {
