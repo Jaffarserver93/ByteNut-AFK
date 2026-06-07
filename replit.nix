@@ -1,5 +1,6 @@
 {pkgs}: {
   deps = [
+    pkgs.xorg.xorgserver
     pkgs.alsa-lib
     pkgs.cairo
     pkgs.pango

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { logger } from "../lib/logger.js";
 import { emitScreenshot, emitStatus, emitLog, clearScreenshotCache } from "../lib/socket.js";
@@ -131,15 +131,16 @@ async function isBinaryValid(binPath: string): Promise<boolean> {
 
 async function findChromeBinary(): Promise<string | null> {
   const candidates = [
+    // Prefer NixOS system chromium — confirmed working in this environment
+    "/run/current-system/sw/bin/chromium",
+    "chromium",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    // Google Chrome fallbacks (may not be present or may be snap stubs)
     "google-chrome-stable",
     "google-chrome",
     "/usr/bin/google-chrome-stable",
     "/usr/bin/google-chrome",
-    "chromium",
-    "/run/current-system/sw/bin/chromium",
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-    "/nix/store/qa9cnw4v5xkxyip6mb9kxqfq1z4x2dx1-chromium-138.0.7204.100/bin/chromium",
   ];
   for (const bin of candidates) {
     let resolvedPath: string | null = null;
@@ -182,6 +183,7 @@ export async function diagnose(): Promise<DiagnosticInfo> {
 
 let browserInstance: any = null;
 let pageInstance: any = null;
+let xvfbProcess: ChildProcess | null = null;
 let state: BotState = "stopped";
 let startedAt: Date | null = null;
 let lastReloadAt: Date | null = null;
@@ -195,6 +197,42 @@ let lastScreenshot: BotScreenshot = { data: null, capturedAt: null };
 let isRenewing = false;
 const auditLog: BotLogEntry[] = [];
 const MAX_LOG_ENTRIES = 500;
+
+const XVFB_DISPLAY = ":99";
+
+async function ensureVirtualDisplay(): Promise<void> {
+  // Kill any stale Xvfb on our display slot
+  try { await execFileAsync("pkill", ["-f", `Xvfb ${XVFB_DISPLAY}`], { timeout: 3000 }); } catch {}
+  await sleep(400);
+
+  await new Promise<void>((resolve) => {
+    xvfbProcess = spawn(
+      "Xvfb",
+      [XVFB_DISPLAY, "-screen", "0", "1280x720x24", "-ac", "+extension", "RANDR"],
+      { detached: true, stdio: "ignore" },
+    );
+    xvfbProcess.unref();
+
+    xvfbProcess.on("error", (err) => {
+      logger.warn({ err }, "[bot] Xvfb failed to start — continuing without virtual display");
+      resolve();
+    });
+
+    // Give Xvfb ~1.5s to initialise before Chrome tries to use it
+    setTimeout(() => {
+      process.env["DISPLAY"] = XVFB_DISPLAY;
+      addLog("info", `Virtual display started on ${XVFB_DISPLAY}`);
+      resolve();
+    }, 1500);
+  });
+}
+
+function stopXvfb(): void {
+  if (xvfbProcess) {
+    try { xvfbProcess.kill("SIGTERM"); } catch {}
+    xvfbProcess = null;
+  }
+}
 
 function addLog(level: BotLogEntry["level"], message: string) {
   const entry: BotLogEntry = {
@@ -1006,6 +1044,8 @@ async function doReload(): Promise<void> {
 }
 
 async function connectBrowser(): Promise<{ browser: any; page: any }> {
+  await ensureVirtualDisplay();
+
   const chromeBinary = await findChromeBinary();
 
   const connectOptions: Record<string, any> = {
@@ -1160,6 +1200,7 @@ async function cleanupBrowser(): Promise<void> {
     browserInstance = null;
     pageInstance = null;
   }
+  stopXvfb();
 }
 
 export async function stopBot(): Promise<BotStatus> {
