@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Play, Square, Terminal, Image as ImageIcon, Activity, Clock, RefreshCw, Trash2, CheckCircle2, AlertTriangle, AlertCircle, Info, Wifi, WifiOff, Timer } from "lucide-react";
+import { Play, Square, Terminal, Image as ImageIcon, Activity, Clock, RefreshCw, Trash2, CheckCircle2, AlertTriangle, AlertCircle, Info, Wifi, WifiOff, Timer, Mail, Loader2 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import socket from "@/lib/socket";
 
@@ -90,6 +90,25 @@ export default function Dashboard() {
         queryClient.invalidateQueries({ queryKey: getGetBotLogsQueryKey() });
       }
     });
+  };
+
+  // Gmail test
+  type GmailTestResult = { ok: boolean; message: string; emailsToday?: number; gmailUser?: string } | null;
+  const [gmailTestResult, setGmailTestResult] = useState<GmailTestResult>(null);
+  const [gmailTesting, setGmailTesting] = useState(false);
+
+  const handleTestGmail = async () => {
+    setGmailTesting(true);
+    setGmailTestResult(null);
+    try {
+      const res = await fetch("/api/bot/test-gmail");
+      const data = await res.json();
+      setGmailTestResult(data);
+    } catch {
+      setGmailTestResult({ ok: false, message: "Could not reach the server." });
+    } finally {
+      setGmailTesting(false);
+    }
   };
 
   // Uptime counter
@@ -249,6 +268,51 @@ export default function Dashboard() {
             </CardContent>
           </Card>
         </div>
+
+        {/* Gmail Test Row */}
+        <Card className="bg-card/40 backdrop-blur-md border-white/5 shadow-xl">
+          <CardContent className="p-4 flex flex-col sm:flex-row items-start sm:items-center gap-4">
+            <div className="flex items-center gap-3 shrink-0">
+              <div className="h-8 w-8 rounded-lg bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center">
+                <Mail className="h-4 w-4 text-cyan-400" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-white">Gmail OTP Connection</p>
+                <p className="text-xs text-muted-foreground">Test IMAP access for auto-renewal</p>
+              </div>
+            </div>
+
+            <div className="flex-1 flex flex-col sm:flex-row items-start sm:items-center gap-3">
+              {gmailTestResult && (
+                <div className={`flex items-start gap-2 flex-1 px-3 py-2 rounded-lg border text-sm ${
+                  gmailTestResult.ok
+                    ? "bg-green-500/10 border-green-500/30 text-green-300"
+                    : "bg-red-500/10 border-red-500/30 text-red-300"
+                }`}>
+                  {gmailTestResult.ok
+                    ? <CheckCircle2 className="h-4 w-4 mt-0.5 shrink-0 text-green-400" />
+                    : <AlertCircle className="h-4 w-4 mt-0.5 shrink-0 text-red-400" />}
+                  <div className="min-w-0">
+                    {gmailTestResult.gmailUser && (
+                      <span className="font-mono text-xs opacity-70 mr-2">{gmailTestResult.gmailUser}</span>
+                    )}
+                    <span>{gmailTestResult.message}</span>
+                  </div>
+                </div>
+              )}
+              <Button
+                onClick={handleTestGmail}
+                disabled={gmailTesting}
+                size="sm"
+                className="shrink-0 bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 border border-cyan-500/30 hover:shadow-[0_0_12px_rgba(6,182,212,0.3)] transition-all duration-300"
+              >
+                {gmailTesting
+                  ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Testing…</>
+                  : <><Mail className="mr-2 h-4 w-4" /> Test Gmail</>}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
 
         {/* Server Time Row */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

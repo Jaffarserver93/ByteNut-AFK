@@ -7,6 +7,7 @@ import {
   getLogs,
   clearLogs,
   diagnose,
+  testGmailConnection,
 } from "../services/bot.js";
 
 const router: IRouter = Router();
@@ -38,6 +39,10 @@ router.delete("/bot/logs", async (_req, res) => {
 
 router.get("/bot/diagnose", async (_req, res) => {
   res.json(await diagnose());
+});
+
+router.get("/bot/test-gmail", async (_req, res) => {
+  res.json(await testGmailConnection());
 });
 
 export default router;

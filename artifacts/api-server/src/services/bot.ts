@@ -843,6 +843,72 @@ async function ensureOnTargetPage(page: any): Promise<void> {
   addLog("success", "Returned to target page");
 }
 
+// ─── Gmail Connection Test ───────────────────────────────────────────────────
+
+export interface GmailTestResult {
+  ok: boolean;
+  message: string;
+  emailsToday?: number;
+  gmailUser?: string;
+}
+
+export async function testGmailConnection(): Promise<GmailTestResult> {
+  const gmailUser = process.env["GMAIL_USER"] ?? "";
+  const gmailPass = process.env["GMAIL_APP_PASSWORD"] ?? "";
+
+  if (!gmailUser || !gmailPass) {
+    return {
+      ok: false,
+      message: "GMAIL_USER or GMAIL_APP_PASSWORD is not set. Add them to your .env file.",
+    };
+  }
+
+  const { ImapFlow } = await import("imapflow");
+  const client = new ImapFlow({
+    host: "imap.gmail.com",
+    port: 993,
+    secure: true,
+    auth: { user: gmailUser, pass: gmailPass },
+    logger: false,
+  });
+
+  try {
+    await client.connect();
+
+    const lock = await client.getMailboxLock("INBOX");
+    let emailsToday = 0;
+    try {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const seqNums = await client.search({ since: today });
+      emailsToday = seqNums.length;
+    } finally {
+      lock.release();
+    }
+
+    await client.logout();
+    return {
+      ok: true,
+      message: `Connected successfully. Found ${emailsToday} email${emailsToday !== 1 ? "s" : ""} in INBOX today.`,
+      emailsToday,
+      gmailUser,
+    };
+  } catch (err: any) {
+    try { await client.logout(); } catch {}
+    const msg: string = err?.message ?? String(err);
+    const hint = msg.toLowerCase().includes("invalid credentials") || msg.toLowerCase().includes("authenticationfailed")
+      ? " Check your App Password is correct and IMAP is enabled in Gmail Settings."
+      : msg.toLowerCase().includes("econnrefused") || msg.toLowerCase().includes("timeout")
+      ? " Could not reach imap.gmail.com — check network connectivity."
+      : "";
+    return {
+      ok: false,
+      message: `Connection failed: ${msg.slice(0, 120)}${hint}`,
+      gmailUser,
+    };
+  }
+}
+
 // ─── Gmail OTP Helper ────────────────────────────────────────────────────────
 
 /**
