@@ -875,11 +875,11 @@ export async function testGmailConnection(): Promise<GmailTestResult> {
   try {
     await client.connect();
 
-    // Use mailboxStatus (STATUS command) — much more reliable than SEARCH;
-    // works even on empty mailboxes and doesn't require a selected mailbox.
-    const mbStatus = await client.status("INBOX", { messages: true, unseen: true });
-    const totalMessages = mbStatus.messages ?? 0;
-    const unseenMessages = mbStatus.unseen ?? 0;
+    // Open INBOX directly — more compatible with Gmail than the STATUS command,
+    // which Gmail sometimes rejects with "Command failed" on certain accounts.
+    const mailbox = await client.mailboxOpen("INBOX", { readOnly: true });
+    const totalMessages = mailbox.exists ?? 0;
+    const unseenMessages = mailbox.unseen ?? 0;
 
     await client.logout();
     return {
