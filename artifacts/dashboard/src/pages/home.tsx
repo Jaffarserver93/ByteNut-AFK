@@ -168,6 +168,7 @@ export default function Dashboard() {
     }
   };
 
+  const logsArray = Array.isArray(logs) ? logs : [];
   const screenshotData = liveScreenshot;
 
   return (
@@ -434,7 +435,7 @@ export default function Dashboard() {
                 variant="ghost" 
                 size="sm" 
                 onClick={handleClearLogs}
-                disabled={clearLogs.isPending || !logs?.length}
+                disabled={clearLogs.isPending || !logsArray.length}
                 className="h-8 text-muted-foreground hover:text-white hover:bg-white/10"
               >
                 <Trash2 className="h-4 w-4 mr-2" /> Clear
@@ -443,12 +444,12 @@ export default function Dashboard() {
             <CardContent className="p-0 flex-1 relative">
               <ScrollArea className="h-[400px] lg:h-full lg:absolute inset-0">
                 <div className="p-4 space-y-2">
-                  {!logs?.length ? (
+                  {!logsArray.length ? (
                     <div className="text-center text-muted-foreground py-8 text-sm">
                       No logs available
                     </div>
                   ) : (
-                    logs.map((log, index) => (
+                    logsArray.map((log, index) => (
                       <div 
                         key={log.id} 
                         className="flex items-start gap-3 p-3 rounded-lg bg-black/20 border border-white/5 animate-in fade-in slide-in-from-bottom-2 duration-300"
