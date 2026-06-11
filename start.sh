@@ -138,10 +138,19 @@ head "Environment Configuration"
 
 if [ -f .env ]; then
   log "Loading .env..."
-  set -a
-  # shellcheck source=/dev/null
-  source .env
-  set +a
+  # Use line-by-line export instead of `source` so values with spaces
+  # (e.g. Gmail App Passwords like "abcd efgh ijkl mnop") are handled safely.
+  while IFS= read -r line || [ -n "$line" ]; do
+    # Skip blank lines and comment lines
+    case "$line" in
+      ''|\#*) continue ;;
+    esac
+    # Strip an optional trailing comment (e.g.  KEY=value  # comment)
+    # Only strip if there's a space before #, to avoid breaking URLs with #
+    line="${line%%  #*}"
+    line="${line%% #*}"
+    export "$line"
+  done < .env
   ok ".env loaded"
 else
   err ".env file not found!"
