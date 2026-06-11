@@ -42,6 +42,7 @@ router.get("/bot/diagnose", async (_req, res) => {
 });
 
 router.get("/bot/test-gmail", async (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   res.json(await testGmailConnection());
 });
 

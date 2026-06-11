@@ -854,12 +854,14 @@ export interface GmailTestResult {
 
 export async function testGmailConnection(): Promise<GmailTestResult> {
   const gmailUser = process.env["GMAIL_USER"] ?? "";
-  const gmailPass = process.env["GMAIL_APP_PASSWORD"] ?? "";
+  // Strip spaces — Google displays App Passwords as "abcd efgh ijkl mnop"
+  // but IMAP requires the 16-char version with no spaces.
+  const gmailPass = (process.env["GMAIL_APP_PASSWORD"] ?? "").replace(/\s+/g, "");
 
   if (!gmailUser || !gmailPass) {
     return {
       ok: false,
-      message: "GMAIL_USER or GMAIL_APP_PASSWORD is not set. Add them to your .env file.",
+      message: "GMAIL_USER or GMAIL_APP_PASSWORD is not set. Add them to your secrets.",
     };
   }
 
@@ -875,8 +877,7 @@ export async function testGmailConnection(): Promise<GmailTestResult> {
   try {
     await client.connect();
 
-    // Open INBOX directly — more compatible with Gmail than the STATUS command,
-    // which Gmail sometimes rejects with "Command failed" on certain accounts.
+    // Open INBOX directly — more compatible with Gmail than the STATUS command.
     const mailbox = await client.mailboxOpen("INBOX", { readOnly: true });
     const totalMessages = mailbox.exists ?? 0;
     const unseenMessages = mailbox.unseen ?? 0;
@@ -890,19 +891,37 @@ export async function testGmailConnection(): Promise<GmailTestResult> {
     };
   } catch (err: any) {
     try { await client.logout(); } catch {}
+
+    // Grab the full server response — ImapFlow stores the raw IMAP server reply
+    // in err.responseText (e.g. "[ALERT] Please log in via your web browser").
+    const serverReply: string = err?.responseText ?? "";
     const msg: string = err?.message ?? String(err);
-    const hint = msg.toLowerCase().includes("invalid credentials")
-      || msg.toLowerCase().includes("authenticationfailed")
-      || msg.toLowerCase().includes("authentication failed")
-        ? " Check: (1) IMAP is enabled in Gmail Settings → See all settings → Forwarding and POP/IMAP, and (2) the App Password is correct (16 chars, generated at myaccount.google.com → Security → App Passwords)."
-      : msg.toLowerCase().includes("econnrefused") || msg.toLowerCase().includes("etimedout")
+    const fullDetail = serverReply && !msg.includes(serverReply)
+      ? `${msg} — Server said: ${serverReply}`
+      : msg;
+
+    logger.error({ gmailUser, msg, serverReply }, "[gmail-test] IMAP connection failed");
+
+    const lower = fullDetail.toLowerCase();
+    const hint =
+      lower.includes("invalid credentials") ||
+      lower.includes("authenticationfailed") ||
+      lower.includes("authentication failed") ||
+      lower.includes("bad credentials")
+        ? " Your App Password appears incorrect. Re-generate one at myaccount.google.com → Security → App Passwords (delete the old one first)."
+      : lower.includes("web browser") || lower.includes("weblogin") || lower.includes("please log in")
+        ? " Google is blocking IMAP from this server's IP address. Open Gmail in a browser, check for a security alert, and approve the access. You may need to unlock access at accounts.google.com/DisplayUnlockCaptcha."
+      : lower.includes("imap access is disabled") || lower.includes("imap not enabled")
+        ? " IMAP is disabled in your Gmail account. Go to Gmail → Settings → See all settings → Forwarding and POP/IMAP → Enable IMAP."
+      : lower.includes("econnrefused") || lower.includes("etimedout")
         ? " Could not reach imap.gmail.com:993 — check network connectivity."
-      : msg.toLowerCase().includes("command failed")
-        ? " Gmail rejected an IMAP command. Ensure IMAP is enabled in Gmail Settings and your App Password has not expired."
+      : lower.includes("command failed") || lower.includes("no ")
+        ? " Gmail rejected the command. Common causes: (1) IMAP is disabled in Gmail Settings, (2) App Password expired or wrong, (3) Google is blocking server IP access — visit accounts.google.com/DisplayUnlockCaptcha to unblock."
         : "";
+
     return {
       ok: false,
-      message: `Connection failed: ${msg.slice(0, 160)}${hint}`,
+      message: `Connection failed: ${fullDetail}${hint}`,
       gmailUser,
     };
   }
