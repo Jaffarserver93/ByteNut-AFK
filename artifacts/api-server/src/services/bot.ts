@@ -864,9 +864,13 @@ async function fetchOtpFromGmail(afterDate: Date, timeoutMs = 60_000): Promise<s
   const deadline = Date.now() + timeoutMs;
   let attempt = 0;
 
+  // IMAP SINCE has day-level precision — anchor to start of the day the OTP was requested
+  const sinceDay = new Date(afterDate);
+  sinceDay.setHours(0, 0, 0, 0);
+
   while (Date.now() < deadline) {
     attempt++;
-    addLog("info", `Checking Gmail for OTP (attempt ${attempt}, waiting for email from noreply@bytenut.com)...`);
+    addLog("info", `Checking Gmail for OTP (attempt ${attempt})...`);
 
     const client = new ImapFlow({
       host: "imap.gmail.com",
@@ -878,39 +882,52 @@ async function fetchOtpFromGmail(afterDate: Date, timeoutMs = 60_000): Promise<s
 
     try {
       await client.connect();
-      await client.mailboxOpen("INBOX");
 
-      // Search for unseen messages from bytenut since afterDate
-      const since = new Date(afterDate.getTime() - 5000); // 5s buffer
-      const messages = await client.search({
-        from: "noreply@bytenut.com",
-        since,
-      });
+      // Use getMailboxLock for proper IMAP session handling
+      const lock = await client.getMailboxLock("INBOX");
+      try {
+        // Search only by date (IMAP combined criteria can cause "Command failed")
+        // Then filter by sender in the fetched body
+        const seqNums = await client.search({ since: sinceDay });
 
-      if (messages.length > 0) {
-        // Get the most recent matching message
-        const uid = messages[messages.length - 1];
-        const msg = await client.fetchOne(String(uid), { source: true });
-        if (msg?.source) {
-          const body = msg.source.toString("utf8");
-          // Extract 6-digit code — look for standalone 6-digit sequences
-          const match = body.match(/\b(\d{6})\b/);
-          if (match) {
-            addLog("success", `OTP found in Gmail: ${match[1]}`);
-            await client.logout();
-            return match[1];
+        if (seqNums.length > 0) {
+          // Check the most recent 15 messages (enough to find today's OTP)
+          const toCheck = seqNums.slice(-15).reverse();
+          for (const seq of toCheck) {
+            try {
+              const msg = await client.fetchOne(String(seq), { source: true });
+              if (!msg?.source) continue;
+
+              const raw = msg.source.toString("utf8");
+
+              // Only process emails from ByteNut
+              if (
+                !raw.includes("noreply@bytenut.com") &&
+                !raw.toLowerCase().includes("bytenut")
+              ) continue;
+
+              // Extract the 6-digit OTP — look for standalone digit sequences
+              const match = raw.match(/\b(\d{6})\b/);
+              if (match) {
+                addLog("success", `OTP found in Gmail: ${match[1]}`);
+                return match[1];
+              }
+            } catch {}
           }
         }
+      } finally {
+        lock.release();
       }
 
       await client.logout();
     } catch (err: any) {
-      addLog("warn", `Gmail IMAP error: ${err?.message?.slice(0, 80) ?? String(err)}`);
+      const msg = err?.message ?? String(err);
+      addLog("warn", `Gmail IMAP error: ${msg.slice(0, 120)}`);
       try { await client.logout(); } catch {}
     }
 
     if (Date.now() < deadline) {
-      addLog("info", "OTP email not yet received — waiting 5s before retry...");
+      addLog("info", "OTP not yet in inbox — retrying in 5s...");
       await sleep(5000);
     }
   }
@@ -1536,7 +1553,7 @@ export async function startBot(): Promise<BotStatus> {
       await pageInstance.setViewport({ width: 1280, height: 720 });
 
       // Start screenshot loop immediately so the user can watch the login & CF challenge live
-      screenshotTimer = setInterval(captureScreenshot, 5_000);
+      screenshotTimer = setInterval(captureScreenshot, 500);
 
       pageInstance.on("close", async () => {
         if (state === "active" || state === "navigating" || state === "logging_in") {
@@ -1590,10 +1607,10 @@ export async function startBot(): Promise<BotStatus> {
         }
       }
 
-      // Upgrade screenshot interval to 10s now that bot is active
+      // Screenshot interval: 500ms for live preview
       if (screenshotTimer) { clearInterval(screenshotTimer); screenshotTimer = null; }
       scheduleNextReload(); // uses recursive setTimeout — never stacks concurrent cycles
-      screenshotTimer = setInterval(captureScreenshot, 10_000);
+      screenshotTimer = setInterval(captureScreenshot, 500);
     } catch (err: any) {
       state = "error";
       errorMessage = err?.message ?? String(err);
