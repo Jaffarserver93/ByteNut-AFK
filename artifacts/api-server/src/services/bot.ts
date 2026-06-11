@@ -1287,11 +1287,20 @@ async function doRenewFlow(page: any): Promise<void> {
     addLog("info", `Clicked: "${extendClicked}"`);
     // Set success state IMMEDIATELY — before any screenshot/sleep that could hang
     lastRenewAt = new Date();
+    // Reset time remaining to 180 min so the next reload cycle doesn't
+    // immediately trigger another renew attempt due to stale 0m value.
+    setTimeRemaining(180);
     addLog("success", "✅ Server time extended successfully! (+180 min)");
     emitStatus(getStatus());
     // Screenshot is best-effort only — page may navigate after the click
     await sleep(2000);
     withTimeout(captureScreenshot(), 4000, undefined).catch(() => {});
+    // Navigate back to the target page so the next reload cycle reads
+    // the updated time from the correct page instead of the renew modal.
+    isRenewing = false;
+    const targetUrl = process.env["TARGET_URL"] ?? "";
+    navigateTo(pageInstance!, targetUrl, "target page (after renewal)").catch(() => {});
+    return;
   } else {
     addLog("warn", "Extend button not found — skipping");
   }
