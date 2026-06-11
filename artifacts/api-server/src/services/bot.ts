@@ -1285,11 +1285,13 @@ async function doRenewFlow(page: any): Promise<void> {
 
   if (extendClicked) {
     addLog("info", `Clicked: "${extendClicked}"`);
-    await sleep(2000);
-    await captureScreenshot();
+    // Set success state IMMEDIATELY — before any screenshot/sleep that could hang
     lastRenewAt = new Date();
     addLog("success", "✅ Server time extended successfully! (+180 min)");
     emitStatus(getStatus());
+    // Screenshot is best-effort only — page may navigate after the click
+    await sleep(2000);
+    withTimeout(captureScreenshot(), 4000, undefined).catch(() => {});
   } else {
     addLog("warn", "Extend button not found — skipping");
   }
