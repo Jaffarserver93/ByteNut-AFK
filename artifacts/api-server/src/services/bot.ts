@@ -875,35 +875,34 @@ export async function testGmailConnection(): Promise<GmailTestResult> {
   try {
     await client.connect();
 
-    const lock = await client.getMailboxLock("INBOX");
-    let emailsToday = 0;
-    try {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const seqNums = await client.search({ since: today });
-      emailsToday = seqNums.length;
-    } finally {
-      lock.release();
-    }
+    // Use mailboxStatus (STATUS command) — much more reliable than SEARCH;
+    // works even on empty mailboxes and doesn't require a selected mailbox.
+    const mbStatus = await client.status("INBOX", { messages: true, unseen: true });
+    const totalMessages = mbStatus.messages ?? 0;
+    const unseenMessages = mbStatus.unseen ?? 0;
 
     await client.logout();
     return {
       ok: true,
-      message: `Connected successfully. Found ${emailsToday} email${emailsToday !== 1 ? "s" : ""} in INBOX today.`,
-      emailsToday,
+      message: `Connected successfully. INBOX has ${totalMessages} message${totalMessages !== 1 ? "s" : ""} (${unseenMessages} unread).`,
+      emailsToday: totalMessages,
       gmailUser,
     };
   } catch (err: any) {
     try { await client.logout(); } catch {}
     const msg: string = err?.message ?? String(err);
-    const hint = msg.toLowerCase().includes("invalid credentials") || msg.toLowerCase().includes("authenticationfailed")
-      ? " Check your App Password is correct and IMAP is enabled in Gmail Settings."
-      : msg.toLowerCase().includes("econnrefused") || msg.toLowerCase().includes("timeout")
-      ? " Could not reach imap.gmail.com — check network connectivity."
-      : "";
+    const hint = msg.toLowerCase().includes("invalid credentials")
+      || msg.toLowerCase().includes("authenticationfailed")
+      || msg.toLowerCase().includes("authentication failed")
+        ? " Check: (1) IMAP is enabled in Gmail Settings → See all settings → Forwarding and POP/IMAP, and (2) the App Password is correct (16 chars, generated at myaccount.google.com → Security → App Passwords)."
+      : msg.toLowerCase().includes("econnrefused") || msg.toLowerCase().includes("etimedout")
+        ? " Could not reach imap.gmail.com:993 — check network connectivity."
+      : msg.toLowerCase().includes("command failed")
+        ? " Gmail rejected an IMAP command. Ensure IMAP is enabled in Gmail Settings and your App Password has not expired."
+        : "";
     return {
       ok: false,
-      message: `Connection failed: ${msg.slice(0, 120)}${hint}`,
+      message: `Connection failed: ${msg.slice(0, 160)}${hint}`,
       gmailUser,
     };
   }
