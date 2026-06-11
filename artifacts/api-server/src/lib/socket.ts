@@ -1,49 +1,60 @@
-import { Server as SocketIOServer } from "socket.io";
+import { WebSocketServer, WebSocket } from "ws";
 import type { Server as HttpServer } from "http";
 import { logger } from "./logger.js";
 
-let io: SocketIOServer | null = null;
+let wss: WebSocketServer | null = null;
 
 let lastScreenshotPayload: { data: string; capturedAt: string } | null = null;
 let lastStatusPayload: object | null = null;
 
-export function initSocket(httpServer: HttpServer): SocketIOServer {
-  io = new SocketIOServer(httpServer, {
-    cors: { origin: "*", methods: ["GET", "POST"] },
-    path: "/socket.io",
-    maxHttpBufferSize: 5 * 1024 * 1024,
-  });
+function broadcast(clients: Set<WebSocket>, message: string): void {
+  for (const client of clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(message);
+    }
+  }
+}
 
-  io.on("connection", (socket) => {
-    logger.info({ socketId: socket.id }, "[socket] client connected");
+export function initSocket(httpServer: HttpServer): WebSocketServer {
+  wss = new WebSocketServer({ server: httpServer, path: "/ws" });
+
+  wss.on("connection", (ws) => {
+    logger.info("[ws] client connected");
 
     if (lastScreenshotPayload) {
-      socket.emit("screenshot", lastScreenshotPayload);
+      ws.send(JSON.stringify({ type: "screenshot", ...lastScreenshotPayload }));
     }
     if (lastStatusPayload) {
-      socket.emit("status", lastStatusPayload);
+      ws.send(JSON.stringify({ type: "status", ...lastStatusPayload }));
     }
 
-    socket.on("disconnect", () => {
-      logger.info({ socketId: socket.id }, "[socket] client disconnected");
+    ws.on("close", () => {
+      logger.info("[ws] client disconnected");
+    });
+
+    ws.on("error", (err) => {
+      logger.warn({ err }, "[ws] client error");
     });
   });
 
-  return io;
+  return wss;
 }
 
 export function emitScreenshot(data: string, capturedAt: string): void {
   lastScreenshotPayload = { data, capturedAt };
-  io?.emit("screenshot", lastScreenshotPayload);
+  if (!wss) return;
+  broadcast(wss.clients, JSON.stringify({ type: "screenshot", data, capturedAt }));
 }
 
 export function emitStatus(status: object): void {
   lastStatusPayload = status;
-  io?.emit("status", status);
+  if (!wss) return;
+  broadcast(wss.clients, JSON.stringify({ type: "status", ...status }));
 }
 
 export function emitLog(entry: object): void {
-  io?.emit("log", entry);
+  if (!wss) return;
+  broadcast(wss.clients, JSON.stringify({ type: "log", ...entry }));
 }
 
 export function clearScreenshotCache(): void {

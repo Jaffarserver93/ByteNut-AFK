@@ -106,7 +106,7 @@ async function buildAll() {
       "rebrowser-puppeteer",
       "rebrowser-puppeteer-core",
       "electron",
-      "socket.io",
+      "ws",
     ],
     sourcemap: "linked",
     plugins: [
