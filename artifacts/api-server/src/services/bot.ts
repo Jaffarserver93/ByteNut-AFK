@@ -1140,7 +1140,7 @@ async function doRenewFlow(page: any): Promise<void> {
   }
 
   addLog("info", "Clicked RENEW SERVER — waiting for renew page to load...");
-  // Wait for the renew page to settle: watch for .clock-time or Turnstile to appear
+  // Wait for the renew page element to appear in the DOM first
   await withTimeout(
     page.waitForSelector('.clock-time, input[name="cf-turnstile-response"], .cf-turnstile', { timeout: 8000 }),
     8500,
@@ -1148,7 +1148,15 @@ async function doRenewFlow(page: any): Promise<void> {
   ).catch(() => {});
 
   // ── Step 2: Read time remaining from the modal page ───────────────────────
-  const clockText = await readClockTimeFromPage(page);
+  // Poll the clock value — the element may appear immediately with "00:00" as
+  // a placeholder while the Vue/React component hydrates the real value.
+  // Keep reading until we get a non-zero value or exhaust retries.
+  let clockText: string | null = null;
+  for (let i = 0; i < 8; i++) {
+    clockText = await readClockTimeFromPage(page);
+    if (clockText && clockText !== "00:00" && clockText !== "0:00") break;
+    await sleep(500); // give the component 500ms more to hydrate
+  }
   let modalMinutes: number | null = null;
 
   if (clockText) {
