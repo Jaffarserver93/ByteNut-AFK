@@ -975,8 +975,8 @@ async function fetchOtpFromGmail(afterDate: Date, timeoutMs = 60_000): Promise<s
         const seqNums = await client.search({ since: sinceDay });
 
         if (seqNums.length > 0) {
-          // Check the most recent 15 messages (enough to find today's OTP)
-          const toCheck = seqNums.slice(-15).reverse();
+          // Check the most recent 20 messages, newest first
+          const toCheck = seqNums.slice(-20).reverse();
           for (const seq of toCheck) {
             try {
               const msg = await client.fetchOne(String(seq), { source: true });
@@ -989,6 +989,16 @@ async function fetchOtpFromGmail(afterDate: Date, timeoutMs = 60_000): Promise<s
                 !raw.includes("noreply@bytenut.com") &&
                 !raw.toLowerCase().includes("bytenut")
               ) continue;
+
+              // Parse the email's Date header and reject anything older than
+              // afterDate — this prevents returning an OTP from a previous cycle
+              const dateHeaderMatch = raw.match(/^Date:\s*(.+)$/mi);
+              if (dateHeaderMatch) {
+                const emailDate = new Date(dateHeaderMatch[1].trim());
+                if (!isNaN(emailDate.getTime()) && emailDate < afterDate) {
+                  continue; // stale email — skip it
+                }
+              }
 
               // Extract the 6-digit OTP — look for standalone digit sequences
               const match = raw.match(/\b(\d{6})\b/);
@@ -1011,8 +1021,8 @@ async function fetchOtpFromGmail(afterDate: Date, timeoutMs = 60_000): Promise<s
     }
 
     if (Date.now() < deadline) {
-      addLog("info", "OTP not yet in inbox — retrying in 5s...");
-      await sleep(5000);
+      addLog("info", "OTP not yet in inbox — retrying in 3s...");
+      await sleep(3000);
     }
   }
 
@@ -1226,6 +1236,9 @@ async function doRenewFlow(page: any): Promise<void> {
   if (hasOtpSection) {
     addLog("info", "Email verification section detected — clicking 'Send Code'...");
 
+    // Record the exact time BEFORE clicking so we can filter out older emails
+    const sendCodeAt = new Date();
+
     // Click "Send Code" button
     const sendCodeClicked: boolean = await page.evaluate(() => {
       const buttons = Array.from(document.querySelectorAll("button, a, input[type='button'], input[type='submit']"));
@@ -1241,23 +1254,21 @@ async function doRenewFlow(page: any): Promise<void> {
 
     if (!sendCodeClicked) {
       addLog("warn", "Could not find 'Send Code' button — trying CSS selector fallback...");
-      // Try direct CSS click
       try {
         const btn = await page.$('button[class*="send" i], button[id*="send" i]');
         if (btn) { await btn.click(); }
       } catch {}
     } else {
-      addLog("success", "Clicked 'Send Code' — waiting 30s for OTP email...");
+      addLog("success", "Clicked 'Send Code' — checking Gmail in 8s...");
     }
 
     await captureScreenshot();
 
-    // Wait 30s then poll Gmail for the OTP
-    addLog("info", "Pausing 30s for OTP email to arrive...");
-    await sleep(30_000);
+    // Short initial wait then poll aggressively — OTP emails typically arrive within 10s
+    addLog("info", "Waiting 8s for OTP email to arrive...");
+    await sleep(8_000);
 
-    const otpSentAt = new Date(Date.now() - 35_000); // buffer: search emails from 35s ago
-    const otp = await fetchOtpFromGmail(otpSentAt, 60_000);
+    const otp = await fetchOtpFromGmail(sendCodeAt, 90_000);
 
     if (!otp) {
       addLog("error", "Could not retrieve OTP from Gmail — skipping extend this cycle");
