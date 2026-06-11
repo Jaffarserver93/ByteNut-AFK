@@ -1108,7 +1108,7 @@ async function doRenewFlow(page: any): Promise<void> {
   }
 
   addLog("info", "Clicked left sidebar RENEW SERVER — waiting for modal to load...");
-  await sleep(2500);
+  await sleep(1000);
   await captureScreenshot();
 
   // ── Step 2: Read time remaining from the modal page ───────────────────────
@@ -1150,7 +1150,7 @@ async function doRenewFlow(page: any): Promise<void> {
 
   // ── Step 4: Solve Turnstile with active retry loop ────────────────────────
   // Give the renewal page a moment to fully render the Turnstile widget
-  await sleep(3000);
+  await sleep(1000);
   await captureScreenshot();
 
   // First check whether a Turnstile even exists on this page
@@ -1216,113 +1216,12 @@ async function doRenewFlow(page: any): Promise<void> {
     }
   }
 
-  addLog("success", "Turnstile solved — handling OTP verification...");
+  addLog("success", "Turnstile solved — clicking Extend button immediately...");
   await captureScreenshot();
-  await sleep(500);
 
-  // ── Step 5: Handle Email OTP verification ────────────────────────────────
-  // Check if the "Send Code" / "Email Verification" section is visible
-  const hasOtpSection = await page.evaluate(() => {
-    const allText = (document.body as HTMLElement).innerText ?? "";
-    return (
-      allText.toLowerCase().includes("send code") ||
-      allText.toLowerCase().includes("email verification") ||
-      allText.toLowerCase().includes("6-digit code") ||
-      !!document.querySelector('input[placeholder*="digit" i]') ||
-      !!document.querySelector('input[placeholder*="code" i]')
-    );
-  }).catch(() => false);
-
-  if (hasOtpSection) {
-    addLog("info", "Email verification section detected — clicking 'Send Code'...");
-
-    // Record the exact time BEFORE clicking so we can filter out older emails
-    const sendCodeAt = new Date();
-
-    // Click "Send Code" button
-    const sendCodeClicked: boolean = await page.evaluate(() => {
-      const buttons = Array.from(document.querySelectorAll("button, a, input[type='button'], input[type='submit']"));
-      for (const btn of buttons) {
-        const txt = ((btn as HTMLElement).innerText ?? (btn as HTMLInputElement).value ?? "").trim().toLowerCase();
-        if (txt.includes("send code") || txt.includes("send otp") || txt.includes("get code")) {
-          (btn as HTMLElement).click();
-          return true;
-        }
-      }
-      return false;
-    }).catch(() => false);
-
-    if (!sendCodeClicked) {
-      addLog("warn", "Could not find 'Send Code' button — trying CSS selector fallback...");
-      try {
-        const btn = await page.$('button[class*="send" i], button[id*="send" i]');
-        if (btn) { await btn.click(); }
-      } catch {}
-    } else {
-      addLog("success", "Clicked 'Send Code' — checking Gmail in 8s...");
-    }
-
-    await captureScreenshot();
-
-    // Short initial wait then poll aggressively — OTP emails typically arrive within 10s
-    addLog("info", "Waiting 8s for OTP email to arrive...");
-    await sleep(8_000);
-
-    const otp = await fetchOtpFromGmail(sendCodeAt, 90_000);
-
-    if (!otp) {
-      addLog("error", "Could not retrieve OTP from Gmail — skipping extend this cycle");
-      isRenewing = false;
-      return;
-    }
-
-    // Type the OTP into the 6-digit input field
-    addLog("info", `Typing OTP code: ${otp}`);
-    const otpTyped = await (async () => {
-      // Try input with digit/code placeholder
-      const selectors = [
-        'input[placeholder*="digit" i]',
-        'input[placeholder*="code" i]',
-        'input[placeholder*="otp" i]',
-        'input[maxlength="6"]',
-        'input[type="number"][maxlength="6"]',
-        'input[type="text"][maxlength="6"]',
-      ];
-      for (const sel of selectors) {
-        try {
-          const el = await page.$(sel);
-          if (el) {
-            await el.click({ clickCount: 3 });
-            await el.type(otp, { delay: 80 });
-            return true;
-          }
-        } catch {}
-      }
-      return false;
-    })();
-
-    if (!otpTyped) {
-      addLog("warn", "Could not find OTP input field — trying to type into any visible text input...");
-      try {
-        await page.evaluate((code: string) => {
-          const inputs = Array.from(document.querySelectorAll('input[type="text"], input[type="number"], input:not([type])'));
-          const visible = inputs.find((el) => {
-            const box = (el as HTMLElement).getBoundingClientRect();
-            return box.width > 0 && box.height > 0;
-          }) as HTMLInputElement | undefined;
-          if (visible) { visible.value = code; visible.dispatchEvent(new Event("input", { bubbles: true })); }
-        }, otp);
-      } catch {}
-    }
-
-    await sleep(500);
-    await captureScreenshot();
-    addLog("info", "OTP entered — proceeding to click Extend button...");
-  } else {
-    addLog("info", "No OTP section found — proceeding directly to Extend button");
-  }
-
-  // ── Step 6: Click the Extend button ──────────────────────────────────────
+  // ── Step 5: Click the Extend button immediately after Turnstile ──────────
+  // OTP/Send Code step intentionally skipped — clicking Extend directly to
+  // prevent the Turnstile token from expiring before the button is reached.
   await sleep(300);
   const candidates = await page.$$("button, a[href], input[type='button'], input[type='submit']");
   for (const el of candidates) {
