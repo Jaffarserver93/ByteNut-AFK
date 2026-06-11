@@ -843,6 +843,82 @@ async function ensureOnTargetPage(page: any): Promise<void> {
   addLog("success", "Returned to target page");
 }
 
+// ─── Gmail OTP Helper ────────────────────────────────────────────────────────
+
+/**
+ * Connects to Gmail via IMAP and fetches the most recent email from
+ * noreply@bytenut.com received after `afterDate`, returning the 6-digit OTP
+ * found in the message body. Retries every 5s up to `timeoutMs`.
+ */
+async function fetchOtpFromGmail(afterDate: Date, timeoutMs = 60_000): Promise<string | null> {
+  const gmailUser = process.env["GMAIL_USER"] ?? "";
+  const gmailPass = process.env["GMAIL_APP_PASSWORD"] ?? "";
+
+  if (!gmailUser || !gmailPass) {
+    addLog("warn", "GMAIL_USER / GMAIL_APP_PASSWORD not set — cannot fetch OTP from email");
+    return null;
+  }
+
+  const { ImapFlow } = await import("imapflow");
+
+  const deadline = Date.now() + timeoutMs;
+  let attempt = 0;
+
+  while (Date.now() < deadline) {
+    attempt++;
+    addLog("info", `Checking Gmail for OTP (attempt ${attempt}, waiting for email from noreply@bytenut.com)...`);
+
+    const client = new ImapFlow({
+      host: "imap.gmail.com",
+      port: 993,
+      secure: true,
+      auth: { user: gmailUser, pass: gmailPass },
+      logger: false,
+    });
+
+    try {
+      await client.connect();
+      await client.mailboxOpen("INBOX");
+
+      // Search for unseen messages from bytenut since afterDate
+      const since = new Date(afterDate.getTime() - 5000); // 5s buffer
+      const messages = await client.search({
+        from: "noreply@bytenut.com",
+        since,
+      });
+
+      if (messages.length > 0) {
+        // Get the most recent matching message
+        const uid = messages[messages.length - 1];
+        const msg = await client.fetchOne(String(uid), { source: true });
+        if (msg?.source) {
+          const body = msg.source.toString("utf8");
+          // Extract 6-digit code — look for standalone 6-digit sequences
+          const match = body.match(/\b(\d{6})\b/);
+          if (match) {
+            addLog("success", `OTP found in Gmail: ${match[1]}`);
+            await client.logout();
+            return match[1];
+          }
+        }
+      }
+
+      await client.logout();
+    } catch (err: any) {
+      addLog("warn", `Gmail IMAP error: ${err?.message?.slice(0, 80) ?? String(err)}`);
+      try { await client.logout(); } catch {}
+    }
+
+    if (Date.now() < deadline) {
+      addLog("info", "OTP email not yet received — waiting 5s before retry...");
+      await sleep(5000);
+    }
+  }
+
+  addLog("error", "Timed out waiting for OTP email from noreply@bytenut.com");
+  return null;
+}
+
 // ─── Auto-Renew Flow ──────────────────────────────────────────────────────────
 
 async function clickRenewSidebarButton(page: any): Promise<boolean> {
@@ -1029,11 +1105,113 @@ async function doRenewFlow(page: any): Promise<void> {
     }
   }
 
-  addLog("success", "Turnstile solved — clicking Extend button...");
+  addLog("success", "Turnstile solved — handling OTP verification...");
   await captureScreenshot();
   await sleep(500);
 
-  // ── Step 5: Click the Extend button ──────────────────────────────────────
+  // ── Step 5: Handle Email OTP verification ────────────────────────────────
+  // Check if the "Send Code" / "Email Verification" section is visible
+  const hasOtpSection = await page.evaluate(() => {
+    const allText = (document.body as HTMLElement).innerText ?? "";
+    return (
+      allText.toLowerCase().includes("send code") ||
+      allText.toLowerCase().includes("email verification") ||
+      allText.toLowerCase().includes("6-digit code") ||
+      !!document.querySelector('input[placeholder*="digit" i]') ||
+      !!document.querySelector('input[placeholder*="code" i]')
+    );
+  }).catch(() => false);
+
+  if (hasOtpSection) {
+    addLog("info", "Email verification section detected — clicking 'Send Code'...");
+
+    // Click "Send Code" button
+    const sendCodeClicked: boolean = await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll("button, a, input[type='button'], input[type='submit']"));
+      for (const btn of buttons) {
+        const txt = ((btn as HTMLElement).innerText ?? (btn as HTMLInputElement).value ?? "").trim().toLowerCase();
+        if (txt.includes("send code") || txt.includes("send otp") || txt.includes("get code")) {
+          (btn as HTMLElement).click();
+          return true;
+        }
+      }
+      return false;
+    }).catch(() => false);
+
+    if (!sendCodeClicked) {
+      addLog("warn", "Could not find 'Send Code' button — trying CSS selector fallback...");
+      // Try direct CSS click
+      try {
+        const btn = await page.$('button[class*="send" i], button[id*="send" i]');
+        if (btn) { await btn.click(); }
+      } catch {}
+    } else {
+      addLog("success", "Clicked 'Send Code' — waiting 30s for OTP email...");
+    }
+
+    await captureScreenshot();
+
+    // Wait 30s then poll Gmail for the OTP
+    addLog("info", "Pausing 30s for OTP email to arrive...");
+    await sleep(30_000);
+
+    const otpSentAt = new Date(Date.now() - 35_000); // buffer: search emails from 35s ago
+    const otp = await fetchOtpFromGmail(otpSentAt, 60_000);
+
+    if (!otp) {
+      addLog("error", "Could not retrieve OTP from Gmail — skipping extend this cycle");
+      isRenewing = false;
+      return;
+    }
+
+    // Type the OTP into the 6-digit input field
+    addLog("info", `Typing OTP code: ${otp}`);
+    const otpTyped = await (async () => {
+      // Try input with digit/code placeholder
+      const selectors = [
+        'input[placeholder*="digit" i]',
+        'input[placeholder*="code" i]',
+        'input[placeholder*="otp" i]',
+        'input[maxlength="6"]',
+        'input[type="number"][maxlength="6"]',
+        'input[type="text"][maxlength="6"]',
+      ];
+      for (const sel of selectors) {
+        try {
+          const el = await page.$(sel);
+          if (el) {
+            await el.click({ clickCount: 3 });
+            await el.type(otp, { delay: 80 });
+            return true;
+          }
+        } catch {}
+      }
+      return false;
+    })();
+
+    if (!otpTyped) {
+      addLog("warn", "Could not find OTP input field — trying to type into any visible text input...");
+      try {
+        await page.evaluate((code: string) => {
+          const inputs = Array.from(document.querySelectorAll('input[type="text"], input[type="number"], input:not([type])'));
+          const visible = inputs.find((el) => {
+            const box = (el as HTMLElement).getBoundingClientRect();
+            return box.width > 0 && box.height > 0;
+          }) as HTMLInputElement | undefined;
+          if (visible) { visible.value = code; visible.dispatchEvent(new Event("input", { bubbles: true })); }
+        }, otp);
+      } catch {}
+    }
+
+    await sleep(500);
+    await captureScreenshot();
+    addLog("info", "OTP entered — proceeding to click Extend button...");
+  } else {
+    addLog("info", "No OTP section found — proceeding directly to Extend button");
+  }
+
+  // ── Step 6: Click the Extend button ──────────────────────────────────────
+  await sleep(300);
   const candidates = await page.$$("button, a[href], input[type='button'], input[type='submit']");
   for (const el of candidates) {
     try {
@@ -1060,7 +1238,7 @@ async function doRenewFlow(page: any): Promise<void> {
     } catch {}
   }
 
-  addLog("warn", "Extend button not found after Turnstile solved — skipping");
+  addLog("warn", "Extend button not found after OTP — skipping");
   isRenewing = false;
 }
 
