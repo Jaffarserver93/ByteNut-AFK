@@ -392,10 +392,16 @@ async function waitForTurnstileAutoSolved(page: any, timeoutMs = 20_000): Promis
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
-      const val: string = await page.evaluate(() => {
-        const input = document.querySelector('input[name="cf-turnstile-response"]') as HTMLInputElement | null;
-        return input?.value ?? "";
-      });
+      // Hard 1.5s timeout per evaluate call — prevents a single hanging call
+      // from consuming the entire timeoutMs budget silently.
+      const val: string = await withTimeout(
+        page.evaluate(() => {
+          const input = document.querySelector('input[name="cf-turnstile-response"]') as HTMLInputElement | null;
+          return input?.value ?? "";
+        }),
+        1500,
+        "",
+      );
       if (val && val.length > 10) return true;
     } catch {}
     await sleep(500);
@@ -1030,38 +1036,23 @@ async function fetchOtpFromGmail(afterDate: Date, timeoutMs = 60_000): Promise<s
   return null;
 }
 
+// ─── Timeout helper ───────────────────────────────────────────────────────────
+// Wraps any Promise with a hard timeout so hanging puppeteer calls (page.$,
+// page.evaluate, etc.) never block the renew flow for more than `ms` ms.
+function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
 // ─── Auto-Renew Flow ──────────────────────────────────────────────────────────
 
 async function clickRenewSidebarButton(page: any): Promise<boolean> {
-  // Wait up to 5s for sidebar to be present after page navigation
-  const cssSelectors = [
-    ".renew-server-menu-item",
-    "li.renew-server-menu-item",
-    'li[class*="renew"]',
-    'a[href*="renew"]',
-    '[data-action*="renew" i]',
-  ];
-
-  for (let attempt = 0; attempt < 3; attempt++) {
-    // CSS selectors (fastest)
-    for (const sel of cssSelectors) {
-      try {
-        const el = await page.$(sel);
-        if (el) {
-          const box = await el.boundingBox();
-          if (box && box.width > 0 && box.height > 0) {
-            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
-            await sleep(150);
-            await el.click();
-            return true;
-          }
-        }
-      } catch {}
-    }
-
-    // Text-based fallback — broader tag set, case-insensitive
-    try {
-      const clicked: boolean = await page.evaluate(() => {
+  // Strategy 1: fast JS click — single evaluate, no hanging page.$ calls
+  try {
+    const clicked: boolean = await withTimeout(
+      page.evaluate(() => {
         const items = Array.from(document.querySelectorAll("li, button, a, span, div[role='button']"));
         for (const el of items) {
           const txt = ((el as HTMLElement).innerText ?? (el as HTMLElement).textContent ?? "").trim().toUpperCase();
@@ -1071,23 +1062,65 @@ async function clickRenewSidebarButton(page: any): Promise<boolean> {
           }
         }
         return false;
-      });
-      if (clicked) return true;
-    } catch {}
+      }),
+      3000,
+      false,
+    );
+    if (clicked) return true;
+  } catch {}
 
-    if (attempt < 2) {
-      await sleep(1500); // Wait for sidebar to render before retrying
-    }
+  // Strategy 2: CSS selector fallbacks with per-call timeout
+  const cssSelectors = [
+    ".renew-server-menu-item",
+    "li.renew-server-menu-item",
+    'li[class*="renew"]',
+    'a[href*="renew"]',
+    '[data-action*="renew" i]',
+  ];
+  for (const sel of cssSelectors) {
+    try {
+      const el = await withTimeout(page.$(sel), 2000, null);
+      if (el) {
+        await el.click().catch(() => {});
+        return true;
+      }
+    } catch {}
   }
+
+  // Strategy 3: retry once after a short wait
+  await sleep(1000);
+  try {
+    const clicked: boolean = await withTimeout(
+      page.evaluate(() => {
+        const items = Array.from(document.querySelectorAll("li, button, a, span, div[role='button']"));
+        for (const el of items) {
+          const txt = ((el as HTMLElement).innerText ?? (el as HTMLElement).textContent ?? "").trim().toUpperCase();
+          if (txt.includes("RENEW SERVER") || txt === "RENEW") {
+            (el as HTMLElement).click();
+            return true;
+          }
+        }
+        return false;
+      }),
+      3000,
+      false,
+    );
+    if (clicked) return true;
+  } catch {}
+
   return false;
 }
 
 async function readClockTimeFromPage(page: any): Promise<string | null> {
   try {
-    const text: string | null = await page.evaluate(() => {
-      const el = document.querySelector(".clock-time");
-      return el ? (el as HTMLElement).innerText.trim() : null;
-    });
+    const text: string | null = await withTimeout(
+      page.evaluate(() => {
+        const el = document.querySelector(".clock-time");
+        return el ? (el as HTMLElement).innerText.trim() : null;
+      }),
+      3000,
+      null,
+    );
     return text ?? null;
   } catch {
     return null;
@@ -1098,7 +1131,6 @@ async function doRenewFlow(page: any): Promise<void> {
   isRenewing = true;
   // ── Step 1: Click RENEW SERVER sidebar button ─────────────────────────────
   addLog("info", "Clicking left sidebar RENEW SERVER...");
-  await captureScreenshot();
 
   const renewClicked = await clickRenewSidebarButton(page);
   if (!renewClicked) {
@@ -1107,9 +1139,13 @@ async function doRenewFlow(page: any): Promise<void> {
     return;
   }
 
-  addLog("info", "Clicked left sidebar RENEW SERVER — waiting for modal to load...");
-  await sleep(1000);
-  await captureScreenshot();
+  addLog("info", "Clicked RENEW SERVER — waiting for renew page to load...");
+  // Wait for the renew page to settle: watch for .clock-time or Turnstile to appear
+  await withTimeout(
+    page.waitForSelector('.clock-time, input[name="cf-turnstile-response"], .cf-turnstile', { timeout: 8000 }),
+    8500,
+    null,
+  ).catch(() => {});
 
   // ── Step 2: Read time remaining from the modal page ───────────────────────
   const clockText = await readClockTimeFromPage(page);
@@ -1138,8 +1174,6 @@ async function doRenewFlow(page: any): Promise<void> {
       const m = modalMinutes % 60;
       addLog("info", `Server time: ${h}h ${m}m remaining — auto-renew triggers at < 60min`);
     }
-    // Release the lock BEFORE the back-navigation so a slow/CF-challenged
-    // navigation cannot block the next reload cycle.
     isRenewing = false;
     const targetUrl = process.env["TARGET_URL"] ?? "";
     navigateTo(page, targetUrl, "target page (back from renew modal)").catch(() => {});
@@ -1147,16 +1181,17 @@ async function doRenewFlow(page: any): Promise<void> {
   }
 
   addLog("warn", `⚠️ Only ${modalMinutes}m remaining — solving Turnstile & extending...`);
-
-  // ── Step 4: Solve Turnstile with active retry loop ────────────────────────
-  // Give the renewal page a moment to fully render the Turnstile widget
-  await sleep(1000);
   await captureScreenshot();
 
-  // First check whether a Turnstile even exists on this page
-  const hasTurnstileInput = await page.$('input[name="cf-turnstile-response"]').catch(() => null);
+  // ── Step 4: Solve Turnstile with active retry loop ────────────────────────
+  // Check whether a Turnstile exists on this page (with timeout — never hangs)
+  const hasTurnstileInput = await withTimeout(
+    page.$('input[name="cf-turnstile-response"]'),
+    3000,
+    null,
+  ).catch(() => null);
+
   if (!hasTurnstileInput) {
-    // No Turnstile present — jump straight to clicking Extend
     addLog("info", "No Turnstile detected on renew page — proceeding to Extend button directly");
   } else {
     let solved = false;
@@ -1164,13 +1199,16 @@ async function doRenewFlow(page: any): Promise<void> {
 
     for (let attempt = 1; attempt <= MAX_TURNSTILE_ATTEMPTS && !solved; attempt++) {
       addLog("info", `Turnstile solve attempt ${attempt}/${MAX_TURNSTILE_ATTEMPTS}...`);
-      await captureScreenshot();
 
-      // Phase A: Check if already solved (token present from a previous round)
-      const existingVal: string = await page.evaluate(() => {
-        const el = document.querySelector('input[name="cf-turnstile-response"]') as HTMLInputElement | null;
-        return el?.value ?? "";
-      }).catch(() => "");
+      // Phase A: Check if already solved — timeout-wrapped so it never hangs
+      const existingVal: string = await withTimeout(
+        page.evaluate(() => {
+          const el = document.querySelector('input[name="cf-turnstile-response"]') as HTMLInputElement | null;
+          return el?.value ?? "";
+        }),
+        2000,
+        "",
+      ).catch(() => "");
       if (existingVal && existingVal.length > 10) {
         addLog("success", "Turnstile already has a valid token — proceeding");
         solved = true;
@@ -1181,32 +1219,31 @@ async function doRenewFlow(page: any): Promise<void> {
       solved = await waitForTurnstileAutoSolved(page, 12_000);
       if (solved) break;
 
-      // Phase C: Auto-solve failed — actively click the widget to reset/trigger it
-      addLog("info", `Auto-solve timed out on attempt ${attempt} — clicking Turnstile widget to reset it...`);
+      // Phase C: Click the widget to reset/trigger it
+      addLog("info", `Auto-solve timed out on attempt ${attempt} — clicking Turnstile widget...`);
       await handleEmbeddedTurnstile(page);
-      await sleep(1500);
+      await sleep(1000);
 
       // Phase D: Wait again after the manual click
       solved = await waitForTurnstileAutoSolved(page, 10_000);
       if (solved) break;
 
-      // Phase E: Try resetting the widget via JS (forces a fresh challenge)
-      try {
-        await page.evaluate(() => {
+      // Phase E: JS reset — no sleep after, let Phase A on next iteration catch the token
+      await withTimeout(
+        page.evaluate(() => {
           if (typeof (window as any).turnstile?.reset === "function") {
             (window as any).turnstile.reset();
           } else {
-            // Try resetting each widget by iterating sitekeys
-            const containers = document.querySelectorAll("[data-sitekey], .cf-turnstile");
-            containers.forEach((c: any) => {
+            document.querySelectorAll("[data-sitekey], .cf-turnstile").forEach((c: any) => {
               try { (window as any).turnstile?.reset(c); } catch {}
             });
           }
-        });
-        addLog("info", "Triggered turnstile.reset() — waiting for fresh challenge...");
-      } catch {}
-      await sleep(3000);
-      await captureScreenshot();
+        }),
+        2000,
+        undefined,
+      ).catch(() => {});
+      addLog("info", "Triggered turnstile.reset() — re-checking on next attempt...");
+      await sleep(2000);
     }
 
     if (!solved) {
@@ -1217,39 +1254,45 @@ async function doRenewFlow(page: any): Promise<void> {
   }
 
   addLog("success", "Turnstile solved — clicking Extend button immediately...");
-  await captureScreenshot();
 
-  // ── Step 5: Click the Extend button immediately after Turnstile ──────────
-  // OTP/Send Code step intentionally skipped — clicking Extend directly to
-  // prevent the Turnstile token from expiring before the button is reached.
-  await sleep(300);
-  const candidates = await page.$$("button, a[href], input[type='button'], input[type='submit']");
-  for (const el of candidates) {
-    try {
-      const box = await el.boundingBox();
-      if (!box || box.width < 10 || box.height < 10) continue;
-      const text: string = await page.evaluate((e: any) => (e.innerText ?? e.value ?? "").trim(), el);
-      const lower = text.toLowerCase();
-      if (
-        lower.includes("extend server") ||
-        lower.includes("+180") ||
-        lower.includes("extend time") ||
-        (lower.includes("extend") && lower.length < 60)
-      ) {
-        addLog("info", `Clicking: "${text.slice(0, 80)}"`);
-        await el.click();
-        await sleep(2500);
-        await captureScreenshot();
-        lastRenewAt = new Date();
-        addLog("success", "✅ Server time extended successfully! (+180 min)");
-        emitStatus(getStatus());
-        isRenewing = false;
-        return;
+  // ── Step 5: Click the Extend button via a single fast JS evaluate ─────────
+  // Using page.evaluate avoids iterating page.$$ + boundingBox per element,
+  // which can each hang for 60s+ if puppeteer has a pending navigation.
+  const extendClicked: string = await withTimeout(
+    page.evaluate(() => {
+      const candidates = Array.from(
+        document.querySelectorAll("button, a, input[type='button'], input[type='submit']"),
+      );
+      for (const el of candidates) {
+        const box = (el as HTMLElement).getBoundingClientRect();
+        if (box.width < 10 || box.height < 10) continue;
+        const text = ((el as HTMLElement).innerText ?? (el as HTMLInputElement).value ?? "").trim().toLowerCase();
+        if (
+          text.includes("extend server") ||
+          text.includes("+180") ||
+          text.includes("extend time") ||
+          (text.includes("extend") && text.length < 60)
+        ) {
+          (el as HTMLElement).click();
+          return text.slice(0, 80);
+        }
       }
-    } catch {}
-  }
+      return "";
+    }),
+    5000,
+    "",
+  ).catch(() => "");
 
-  addLog("warn", "Extend button not found after OTP — skipping");
+  if (extendClicked) {
+    addLog("info", `Clicked: "${extendClicked}"`);
+    await sleep(2000);
+    await captureScreenshot();
+    lastRenewAt = new Date();
+    addLog("success", "✅ Server time extended successfully! (+180 min)");
+    emitStatus(getStatus());
+  } else {
+    addLog("warn", "Extend button not found — skipping");
+  }
   isRenewing = false;
 }
 
